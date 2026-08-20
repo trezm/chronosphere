@@ -627,6 +627,30 @@ function ReplayWorkspace({ repo, summary, defaultModel, onBack }: { repo: Reposi
     scrollRef.current?.scrollTo({ top: 0 });
   };
 
+  useEffect(() => {
+    if (!replay) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isEditable = target instanceof HTMLElement && (
+        target.isContentEditable || target.matches("input, textarea, select")
+      );
+      if (isEditable || !event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+
+      event.preventDefault();
+      setPlaying(false);
+      setStep((current) => Math.max(0, Math.min(
+        replay.chunks.length - 1,
+        current + (event.key === "ArrowLeft" ? -1 : 1),
+      )));
+      scrollRef.current?.scrollTo({ top: 0 });
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [replay]);
+
   if (loading || !pull) {
     return <main className="loading-screen"><span className="spinner large" /><strong>Loading #{summary.number}</strong><span>{repo.fullName}</span>{error && <div className="error-banner">{error}</div>}</main>;
   }
@@ -669,9 +693,9 @@ function ReplayWorkspace({ repo, summary, defaultModel, onBack }: { repo: Reposi
           </aside>
           <section className="code-stage">
             <header className="player-bar">
-              <button className="icon-button" onClick={() => go(step - 1)} disabled={step === 0}><ChevronLeft size={16} /></button>
+              <button className="icon-button" onClick={() => go(step - 1)} disabled={step === 0} aria-label="Previous replay step" aria-keyshortcuts="Meta+ArrowLeft" title="Previous step (⌘←)"><ChevronLeft size={16} /></button>
               <button className="play-button" onClick={() => { if (step === replay.chunks.length - 1) setStep(0); setPlaying((value) => !value); }}>{playing ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}{playing ? "Pause" : "Play"}</button>
-              <button className="icon-button" onClick={() => go(step + 1)} disabled={step === replay.chunks.length - 1}><ChevronRight size={16} /></button>
+              <button className="icon-button" onClick={() => go(step + 1)} disabled={step === replay.chunks.length - 1} aria-label="Next replay step" aria-keyshortcuts="Meta+ArrowRight" title="Next step (⌘→)"><ChevronRight size={16} /></button>
               <input type="range" min={0} max={Math.max(0, replay.chunks.length - 1)} value={step} onChange={(e) => go(Number(e.target.value))} aria-label="Replay position" />
               <strong>{step + 1} <span>/ {replay.chunks.length}</span></strong>
               <button className="rebuild-button" onClick={() => { setReplay(null); setPlaying(false); }}>Rebuild</button>
