@@ -32,6 +32,13 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { parseUnifiedDiff } from "@/lib/diff";
+import {
+  clearInProgressReview,
+  loadInProgressReview,
+  reviewCacheKey,
+  saveInProgressReview,
+  type ReviewEvent,
+} from "@/lib/review-cache";
 import type {
   DiffFile,
   DiffLine,
@@ -48,8 +55,6 @@ type AuthState = {
   configured: { github: boolean };
   defaults: { model: string };
 };
-
-type ReviewEvent = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -475,6 +480,10 @@ function ReviewSidebar({
   repo,
   pull,
   comments,
+  event,
+  summary,
+  onEventChange,
+  onSummaryChange,
   onDeleteComment,
   onSubmitted,
   onMerged,
@@ -482,12 +491,14 @@ function ReviewSidebar({
   repo: Repository;
   pull: PullRequestDetail;
   comments: PendingComment[];
+  event: ReviewEvent;
+  summary: string;
+  onEventChange: (event: ReviewEvent) => void;
+  onSummaryChange: (summary: string) => void;
   onDeleteComment: (id: string) => void;
   onSubmitted: () => void;
   onMerged: () => void;
 }) {
-  const [event, setEvent] = useState<ReviewEvent>("COMMENT");
-  const [summary, setSummary] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [mergeMethod, setMergeMethod] = useState<"merge" | "squash" | "rebase">(
@@ -504,7 +515,7 @@ function ReviewSidebar({
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo: repo.fullName, number: pull.number, event, body: summary, commitId: pull.headSha, comments }),
       });
-      setSummary(""); setEvent("COMMENT"); setMessage("Review posted to GitHub."); onSubmitted();
+      setMessage("Review posted to GitHub."); onSubmitted();
     } catch (error) { setMessage(error instanceof Error ? error.message : "Review failed."); }
     finally { setBusy(false); }
   };
@@ -539,10 +550,10 @@ function ReviewSidebar({
             </div>
           ))}
         </div>
-        <textarea className="review-summary" value={summary} onChange={(e) => setSummary(e.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void submitReview(); } }} placeholder="Add an overall review summary…" />
+        <textarea className="review-summary" value={summary} onChange={(e) => onSummaryChange(e.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void submitReview(); } }} placeholder="Add an overall review summary…" />
         <div className="review-events">
           {([['COMMENT', 'Comment', MessageSquare], ['APPROVE', 'Approve', CheckCircle2], ['REQUEST_CHANGES', 'Changes', XCircle]] as const).map(([value, label, Icon]) => (
-            <button key={value} className={event === value ? "active" : ""} onClick={() => setEvent(value)}><Icon size={14} />{label}</button>
+            <button key={value} className={event === value ? "active" : ""} onClick={() => onEventChange(value)}><Icon size={14} />{label}</button>
           ))}
         </div>
         <button className="primary-button full" onClick={submitReview} disabled={busy || (!comments.length && !summary.trim())}>{busy ? "Submitting…" : `Submit review · ${comments.length} comment${comments.length === 1 ? "" : "s"}`}</button>
@@ -572,18 +583,22 @@ function ReviewSidebar({
   );
 }
 
-function ReplayWorkspace({ repo, summary, defaultModel, onBack }: { repo: Repository; summary: PullRequestSummary; defaultModel: string; onBack: () => void }) {
+function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo: Repository; summary: PullRequestSummary; defaultModel: string; viewer: string; onBack: () => void }) {
   const [pull, setPull] = useState<PullRequestDetail | null>(null);
   const [replay, setReplay] = useState<ReplayResult | null>(null);
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [comments, setComments] = useState<PendingComment[]>([]);
+  const [reviewEvent, setReviewEvent] = useState<ReviewEvent>("COMMENT");
+  const [reviewSummary, setReviewSummary] = useState("");
   const [loading, setLoading] = useState(true);
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState(defaultModel);
   const [showFullDiff, setShowFullDiff] = useState(false);
+  const [cacheReady, setCacheReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const cacheKey = useMemo(() => reviewCacheKey(viewer, repo.fullName, summary.number), [viewer, repo.fullName, summary.number]);
 
   const refreshPull = async () => {
     const { pull } = await api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}`);
@@ -592,11 +607,53 @@ function ReplayWorkspace({ repo, summary, defaultModel, onBack }: { repo: Reposi
   useEffect(() => {
     let active = true;
     api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}`)
-      .then(({ pull }) => { if (active) setPull(pull); })
+      .then(({ pull }) => {
+        if (!active) return;
+        setPull(pull);
+        try {
+          const cached = loadInProgressReview(window.localStorage, cacheKey, pull.headSha);
+          if (cached) {
+            setReplay(cached.replay);
+            setStep(Math.min(cached.step, Math.max(0, cached.replay.chunks.length - 1)));
+            setComments(cached.comments);
+            setReviewSummary(cached.summary);
+            setReviewEvent(cached.event);
+            setModel(cached.model);
+            setShowFullDiff(cached.showFullDiff);
+          }
+        } catch {
+          // Browser privacy settings and storage quotas must not block review work.
+        }
+        setCacheReady(true);
+      })
       .catch((error: Error) => { if (active) setError(error.message); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [repo.fullName, summary.number]);
+  }, [repo.fullName, summary.number, cacheKey]);
+  useEffect(() => {
+    if (!cacheReady || !pull) return;
+    try {
+      if (!comments.length && !reviewSummary.trim()) {
+        clearInProgressReview(window.localStorage, cacheKey);
+        return;
+      }
+      // A rebuild briefly removes the replay from memory; retain the last complete
+      // cached draft until its replacement is ready.
+      if (!replay) return;
+      saveInProgressReview(window.localStorage, cacheKey, {
+        headSha: pull.headSha,
+        replay,
+        step,
+        comments,
+        summary: reviewSummary,
+        event: reviewEvent,
+        model,
+        showFullDiff,
+      });
+    } catch {
+      // Keep the in-memory review usable if browser storage is unavailable.
+    }
+  }, [cacheReady, cacheKey, comments, model, pull, replay, reviewEvent, reviewSummary, showFullDiff, step]);
   useEffect(() => {
     if (!playing || !replay) return;
     if (step >= replay.chunks.length - 1) {
@@ -625,6 +682,12 @@ function ReplayWorkspace({ repo, summary, defaultModel, onBack }: { repo: Reposi
     if (!replay) return;
     setPlaying(false); setStep(Math.max(0, Math.min(replay.chunks.length - 1, value)));
     scrollRef.current?.scrollTo({ top: 0 });
+  };
+  const completeReview = () => {
+    try { clearInProgressReview(window.localStorage, cacheKey); } catch { /* Storage may be unavailable. */ }
+    setComments([]);
+    setReviewSummary("");
+    setReviewEvent("COMMENT");
   };
 
   useEffect(() => {
@@ -714,7 +777,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, onBack }: { repo: Reposi
               {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRange={chunk ? { start: chunk.start, end: chunk.end } : null} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} />)}
             </div>
           </section>
-          <ReviewSidebar repo={repo} pull={pull} comments={comments} onDeleteComment={(id) => setComments((items) => items.filter((item) => item.id !== id))} onSubmitted={() => setComments([])} onMerged={() => void refreshPull()} />
+          <ReviewSidebar repo={repo} pull={pull} comments={comments} event={reviewEvent} summary={reviewSummary} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onDeleteComment={(id) => setComments((items) => items.filter((item) => item.id !== id))} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
         </div>
       )}
     </main>
@@ -742,7 +805,7 @@ export default function Home() {
   return (
     <div className="app-frame">
       <AppHeader auth={auth} onToggleTheme={toggleTheme} onLogout={logout} />
-      {!ready ? <ConnectionGate auth={auth} /> : selection ? <ReplayWorkspace repo={selection.repo} summary={selection.pull} defaultModel={auth.defaults.model} onBack={() => setSelection(null)} /> : <RepositoryPicker viewer={auth.github.user!} onOpen={(repo, pull) => setSelection({ repo, pull })} />}
+      {!ready ? <ConnectionGate auth={auth} /> : selection ? <ReplayWorkspace repo={selection.repo} summary={selection.pull} defaultModel={auth.defaults.model} viewer={auth.github.user!.login} onBack={() => setSelection(null)} /> : <RepositoryPicker viewer={auth.github.user!} onOpen={(repo, pull) => setSelection({ repo, pull })} />}
     </div>
   );
 }
