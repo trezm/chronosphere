@@ -19,19 +19,21 @@ import {
   MessageSquare,
   Moon,
   Pause,
+  Pencil,
   Play,
   RotateCcw,
   Search,
   ShieldCheck,
   Sparkles,
   Sun,
+  Trash2,
   UserRoundCheck,
-  X,
   XCircle,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { parseUnifiedDiff } from "@/lib/diff";
+import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
 import {
   clearInProgressReview,
   loadInProgressReview,
@@ -328,6 +330,8 @@ function ReplayFileView({
   contentRef,
   comments,
   onAdd,
+  onUpdate,
+  onDelete,
 }: {
   file: DiffFile;
   step: number;
@@ -337,14 +341,24 @@ function ReplayFileView({
   contentRef: string;
   comments: PendingComment[];
   onAdd: (comment: Omit<PendingComment, "id">) => void;
+  onUpdate: (id: string, body: string) => void;
+  onDelete: (id: string) => void;
 }) {
   const [target, setTarget] = useState<{ line: number; side: "LEFT" | "RIGHT"; index: number | null } | null>(null);
   const [body, setBody] = useState("");
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editedBody, setEditedBody] = useState("");
   const [contentLines, setContentLines] = useState<string[] | null>(null);
+  const [highlightedHunks, setHighlightedHunks] = useState<SyntaxToken[][][]>([]);
+  const [highlightedContent, setHighlightedContent] = useState<SyntaxToken[][] | null>(null);
   const [expanded, setExpanded] = useState<Record<number, { before: number; after: number }>>({});
   const [expanding, setExpanding] = useState<string | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
   const contentLinesRef = useRef<string[] | null>(null);
+  const syntaxLanguage = useMemo(
+    () => languageForPath(file.path, file.hunks.flatMap((hunk) => hunk.lines.map((line) => line.text)).join("\n")),
+    [file.hunks, file.path]
+  );
   const fileComments = comments.filter((comment) => comment.path === file.path);
   const visibleHunks = file.hunks
     .map((hunk, originalIndex) => ({
@@ -356,6 +370,28 @@ function ReplayFileView({
         : hunk.lines.filter((line) => line.type === "context" || (line.changedIndex !== null && currentRange && line.changedIndex >= currentRange.start && line.changedIndex <= currentRange.end)),
     }))
     .filter((hunk) => showFullDiff || hunk.sourceLines.some((line) => line.changedIndex !== null && currentRange && line.changedIndex >= currentRange.start && line.changedIndex <= currentRange.end));
+  useEffect(() => {
+    let stale = false;
+    Promise.all(file.hunks.map((hunk) => highlightLines(hunk.lines.map((line) => line.text), syntaxLanguage)))
+      .then((result) => { if (!stale) setHighlightedHunks(result); });
+    return () => { stale = true; };
+  }, [file.hunks, syntaxLanguage]);
+
+  useEffect(() => {
+    if (!contentLines) return;
+    let stale = false;
+    highlightLines(contentLines, syntaxLanguage).then((result) => { if (!stale) setHighlightedContent(result); });
+    return () => { stale = true; };
+  }, [contentLines, syntaxLanguage]);
+
+  const renderCode = (tokens: SyntaxToken[] | undefined, fallback: string) => {
+    if (!tokens) return fallback || " ";
+    if (!tokens.length) return " ";
+    return tokens.map((token, index) => token.type
+      ? <span className={`shj-syn-${token.type}`} key={index}>{token.text}</span>
+      : <Fragment key={index}>{token.text}</Fragment>
+    );
+  };
   if (!visibleHunks.length) return null;
 
   const usesOldContent = file.status === "deleted";
@@ -409,7 +445,7 @@ function ReplayFileView({
           <span className="context-gutter" />
           <span className="line-number">{usesOldContent ? line : ""}</span>
           <span className="line-number">{usesOldContent ? "" : line}</span>
-          <code><i> </i>{contentLines[line - 1] || " "}</code>
+          <code><i> </i>{renderCode(highlightedContent?.[line - 1], contentLines[line - 1])}</code>
         </div>
       );
     });
@@ -426,6 +462,19 @@ function ReplayFileView({
     setBody("");
     setTarget(null);
   };
+  const startEditing = (comment: PendingComment) => {
+    setEditingCommentId(comment.id);
+    setEditedBody(comment.body);
+  };
+  const cancelEditing = () => {
+    setEditingCommentId(null);
+    setEditedBody("");
+  };
+  const saveEditedComment = () => {
+    if (!editingCommentId || !editedBody.trim()) return;
+    onUpdate(editingCommentId, editedBody.trim());
+    cancelEditing();
+  };
   return (
     <article className="diff-file">
       <header><span className="file-dot" /> <code>{file.oldPath && file.oldPath !== file.path ? `${file.oldPath} → ` : ""}{file.path}</code><span>{fileComments.length ? `${fileComments.length} pending` : file.status}</span></header>
@@ -439,11 +488,9 @@ function ReplayFileView({
           const canExpandAfter = expansion.after + (expanded[hunk.originalIndex + 1]?.before ?? 0) < nextFirst - hunkBounds.last - 1;
           return (
           <Fragment key={`${file.path}-${hunk.originalIndex}`}>
+            {canExpandBefore && <div className="context-expander above"><button onClick={() => void expandContext(hunk.originalIndex, "before")} disabled={expanding !== null} aria-label="Show 20 lines above" title="Show more lines above"><ChevronUp size={13} />Show 20 lines above</button></div>}
             {contextRows(hunkBounds.first - expansion.before, hunkBounds.first - 1)}
-            <div className="hunk-row"><span /><span /><code>{hunk.header}</code><div className="hunk-expanders">
-              {canExpandBefore && <button onClick={() => void expandContext(hunk.originalIndex, "before")} disabled={expanding !== null} aria-label="Show 20 lines above" title="Show more lines above"><ChevronUp size={13} /></button>}
-              {canExpandAfter && <button onClick={() => void expandContext(hunk.originalIndex, "after")} disabled={expanding !== null} aria-label="Show 20 lines below" title="Show more lines below"><ChevronDown size={13} /></button>}
-            </div></div>
+            <div className="hunk-row"><span /><span /><code>{hunk.header}</code></div>
             {hunk.lines.map((line, lineIndex) => {
               const current = line.changedIndex !== null && currentRange && line.changedIndex >= currentRange.start && line.changedIndex <= currentRange.end;
               const anchor = commentTarget(line);
@@ -455,9 +502,25 @@ function ReplayFileView({
                     <button className="add-comment" onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`Comment on line ${anchor.line}`}><span>+</span></button>
                     <span className="line-number">{line.oldLine ?? ""}</span>
                     <span className="line-number">{line.newLine ?? ""}</span>
-                    <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{line.text || " "}</code>
+                    <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{renderCode(highlightedHunks[hunk.originalIndex]?.[hunk.sourceLines.indexOf(line)], line.text)}</code>
                   </div>
-                  {anchored.map((comment) => <div className="inline-draft" key={comment.id}><MessageSquare size={13} /><span>{comment.body}</span><em>Pending</em></div>)}
+                  {anchored.map((comment) => editingCommentId === comment.id ? (
+                    <div className="inline-composer inline-comment-editor" key={comment.id}>
+                      <textarea autoFocus value={editedBody} onChange={(event) => setEditedBody(event.target.value)} onKeyDown={(event) => {
+                        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveEditedComment(); }
+                        if (event.key === "Escape") { event.preventDefault(); cancelEditing(); }
+                      }} aria-label={`Edit comment on ${file.path}:${comment.line}`} />
+                      <div><button className="text-button" onClick={cancelEditing}>Cancel</button><button className="primary-button compact" onClick={saveEditedComment} disabled={!editedBody.trim()}>Save comment</button></div>
+                    </div>
+                  ) : (
+                    <div className="inline-draft" key={comment.id}>
+                      <MessageSquare size={13} /><span>{comment.body}</span><em>Pending</em>
+                      <div className="comment-actions">
+                        <button onClick={() => startEditing(comment)} aria-label="Edit pending comment" title="Edit comment"><Pencil size={12} /></button>
+                        <button className="delete" onClick={() => onDelete(comment.id)} aria-label="Delete pending comment" title="Delete comment"><Trash2 size={12} /></button>
+                      </div>
+                    </div>
+                  ))}
                   {composing && (
                     <div className="inline-composer">
                       <textarea autoFocus value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitComment(); } }} placeholder={`Leave a comment on ${file.path}:${anchor.line}`} />
@@ -468,6 +531,7 @@ function ReplayFileView({
               );
             })}
             {contextRows(hunkBounds.last + 1, hunkBounds.last + expansion.after)}
+            {canExpandAfter && <div className="context-expander below"><button onClick={() => void expandContext(hunk.originalIndex, "after")} disabled={expanding !== null} aria-label="Show 20 lines below" title="Show more lines below"><ChevronDown size={13} />Show 20 lines below</button></div>}
           </Fragment>
         );})}
       </div>
@@ -484,6 +548,7 @@ function ReviewSidebar({
   summary,
   onEventChange,
   onSummaryChange,
+  onUpdateComment,
   onDeleteComment,
   onSubmitted,
   onMerged,
@@ -495,6 +560,7 @@ function ReviewSidebar({
   summary: string;
   onEventChange: (event: ReviewEvent) => void;
   onSummaryChange: (summary: string) => void;
+  onUpdateComment: (id: string, body: string) => void;
   onDeleteComment: (id: string) => void;
   onSubmitted: () => void;
   onMerged: () => void;
@@ -506,6 +572,26 @@ function ReviewSidebar({
   );
   const [confirmMerge, setConfirmMerge] = useState(false);
   const [mergeBusy, setMergeBusy] = useState(false);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editedBody, setEditedBody] = useState("");
+
+  const startEditing = (comment: PendingComment) => {
+    setEditingCommentId(comment.id);
+    setEditedBody(comment.body);
+  };
+  const cancelEditing = () => {
+    setEditingCommentId(null);
+    setEditedBody("");
+  };
+  const saveEditedComment = () => {
+    if (!editingCommentId || !editedBody.trim()) return;
+    onUpdateComment(editingCommentId, editedBody.trim());
+    cancelEditing();
+  };
+  const deleteComment = (id: string) => {
+    if (editingCommentId === id) cancelEditing();
+    onDeleteComment(id);
+  };
 
   const submitReview = async () => {
     if (busy || (!comments.length && !summary.trim())) return;
@@ -545,8 +631,20 @@ function ReviewSidebar({
           {!comments.length && <p className="sidebar-empty">Hover a diff line and press <kbd>+</kbd> to start a review comment.</p>}
           {comments.map((comment) => (
             <div className="draft-card" key={comment.id}>
-              <div><code>{comment.path}:{comment.line}</code><button onClick={() => onDeleteComment(comment.id)} aria-label="Discard comment"><X size={13} /></button></div>
-              <p>{comment.body}</p><span>Step {comment.step + 1} · {comment.side === "LEFT" ? "old" : "new"} side</span>
+              <div className="draft-card-header"><code>{comment.path}:{comment.line}</code><div className="comment-actions">
+                <button onClick={() => startEditing(comment)} aria-label="Edit pending comment" title="Edit comment"><Pencil size={12} /></button>
+                <button className="delete" onClick={() => deleteComment(comment.id)} aria-label="Delete pending comment" title="Delete comment"><Trash2 size={12} /></button>
+              </div></div>
+              {editingCommentId === comment.id ? (
+                <div className="draft-card-editor">
+                  <textarea autoFocus value={editedBody} onChange={(event) => setEditedBody(event.target.value)} onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveEditedComment(); }
+                    if (event.key === "Escape") { event.preventDefault(); cancelEditing(); }
+                  }} aria-label={`Edit comment on ${comment.path}:${comment.line}`} />
+                  <div><button className="text-button" onClick={cancelEditing}>Cancel</button><button className="primary-button compact" onClick={saveEditedComment} disabled={!editedBody.trim()}>Save</button></div>
+                </div>
+              ) : <p>{comment.body}</p>}
+              <span>Step {comment.step + 1} · {comment.side === "LEFT" ? "old" : "new"} side</span>
             </div>
           ))}
         </div>
@@ -689,6 +787,12 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
     setReviewSummary("");
     setReviewEvent("COMMENT");
   };
+  const updateComment = (id: string, body: string) => {
+    setComments((items) => items.map((item) => item.id === id ? { ...item, body } : item));
+  };
+  const deleteComment = (id: string) => {
+    setComments((items) => items.filter((item) => item.id !== id));
+  };
 
   useEffect(() => {
     if (!replay) return;
@@ -774,10 +878,10 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
               <h2>{chunk.title}</h2><p>{chunk.description}</p>
             </div>}
             <div className="diff-scroll" ref={scrollRef}>
-              {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRange={chunk ? { start: chunk.start, end: chunk.end } : null} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} />)}
+              {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRange={chunk ? { start: chunk.start, end: chunk.end } : null} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onUpdate={updateComment} onDelete={deleteComment} />)}
             </div>
           </section>
-          <ReviewSidebar repo={repo} pull={pull} comments={comments} event={reviewEvent} summary={reviewSummary} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onDeleteComment={(id) => setComments((items) => items.filter((item) => item.id !== id))} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
+          <ReviewSidebar repo={repo} pull={pull} comments={comments} event={reviewEvent} summary={reviewSummary} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
         </div>
       )}
     </main>
