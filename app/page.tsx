@@ -30,8 +30,9 @@ import {
   UserRoundCheck,
   XCircle,
 } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
+import { api, isApiErrorWithStatus } from "@/lib/api";
 import { parseUnifiedDiff } from "@/lib/diff";
 import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
 import {
@@ -57,13 +58,6 @@ type AuthState = {
   configured: { github: boolean };
   defaults: { model: string };
 };
-
-async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
-  const body = (await response.json()) as T & { error?: string };
-  if (!response.ok) throw new Error(body.error || `${response.status} ${response.statusText}`);
-  return body;
-}
 
 function timeAgo(value: string): string {
   const seconds = Math.max(1, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
@@ -123,8 +117,9 @@ function AppHeader({
   );
 }
 
-function ConnectionGate({ auth }: { auth: AuthState }) {
-  const error = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("error") : null;
+function ConnectionGate({ auth, connectionError }: { auth: AuthState; connectionError?: string | null }) {
+  const queryError = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("error") : null;
+  const error = connectionError ?? queryError;
   const steps = [
     {
       key: "github",
@@ -198,9 +193,11 @@ function People({ people, empty = "Unassigned" }: { people: Array<{ login: strin
 function RepositoryPicker({
   viewer,
   onOpen,
+  onReconnectRequired,
 }: {
   viewer: NonNullable<AuthState["github"]["user"]>;
   onOpen: (repo: Repository, pull: PullRequestSummary) => void;
+  onReconnectRequired: () => void;
 }) {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [selected, setSelected] = useState<Repository | null>(null);
@@ -221,9 +218,15 @@ function RepositoryPicker({
           setSelected(repositories[0]);
         }
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((error: unknown) => {
+        if (isApiErrorWithStatus(error, 400, 401)) {
+          onReconnectRequired();
+          return;
+        }
+        setError(error instanceof Error ? error.message : "Could not load repositories.");
+      })
       .finally(() => setLoadingRepos(false));
-  }, []);
+  }, [onReconnectRequired]);
 
   useEffect(() => {
     if (!selected) return;
@@ -891,6 +894,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
 export default function Home() {
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [selection, setSelection] = useState<{ repo: Repository; pull: PullRequestSummary } | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
 
   useEffect(() => {
     api<AuthState>("/api/auth/session").then(setAuth).catch(() => setAuth({ github: { connected: false, user: null }, openrouter: { connected: false, userId: null }, configured: { github: false }, defaults: { model: "openai/gpt-5-mini" } }));
@@ -904,12 +908,20 @@ export default function Home() {
     await api("/api/auth/logout", { method: "POST" });
     window.location.href = "/";
   };
+  const requireGithubReconnect = useCallback(() => {
+    setSelection(null);
+    setConnectionError("Your GitHub credentials are no longer valid. Reconnect GitHub to continue.");
+    setAuth((current) => current ? {
+      ...current,
+      github: { connected: false, user: null },
+    } : current);
+  }, []);
   if (!auth) return <main className="loading-screen"><span className="spinner large" /><strong>Opening Chronosphere</strong></main>;
   const ready = auth.github.connected && auth.openrouter.connected && auth.github.user;
   return (
     <div className="app-frame">
       <AppHeader auth={auth} onToggleTheme={toggleTheme} onLogout={logout} />
-      {!ready ? <ConnectionGate auth={auth} /> : selection ? <ReplayWorkspace repo={selection.repo} summary={selection.pull} defaultModel={auth.defaults.model} viewer={auth.github.user!.login} onBack={() => setSelection(null)} /> : <RepositoryPicker viewer={auth.github.user!} onOpen={(repo, pull) => setSelection({ repo, pull })} />}
+      {!ready ? <ConnectionGate auth={auth} connectionError={connectionError} /> : selection ? <ReplayWorkspace repo={selection.repo} summary={selection.pull} defaultModel={auth.defaults.model} viewer={auth.github.user!.login} onBack={() => setSelection(null)} /> : <RepositoryPicker viewer={auth.github.user!} onOpen={(repo, pull) => setSelection({ repo, pull })} onReconnectRequired={requireGithubReconnect} />}
     </div>
   );
 }
