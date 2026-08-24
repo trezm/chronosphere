@@ -33,7 +33,7 @@ import {
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { api, isApiErrorWithStatus } from "@/lib/api";
-import { parseUnifiedDiff } from "@/lib/diff";
+import { parseUnifiedDiff, replayStepMap } from "@/lib/diff";
 import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
 import {
   clearInProgressReview,
@@ -48,6 +48,7 @@ import type {
   PendingComment,
   PullRequestDetail,
   PullRequestSummary,
+  ReplayChunk,
   ReplayResult,
   Repository,
 } from "@/lib/types";
@@ -328,6 +329,8 @@ function ReplayFileView({
   file,
   step,
   currentRange,
+  replayChunks,
+  changeSteps,
   showFullDiff,
   contentRepo,
   contentRef,
@@ -335,10 +338,13 @@ function ReplayFileView({
   onAdd,
   onUpdate,
   onDelete,
+  onGoToStep,
 }: {
   file: DiffFile;
   step: number;
   currentRange: { start: number; end: number } | null;
+  replayChunks: ReplayChunk[];
+  changeSteps: ReadonlyMap<number, number>;
   showFullDiff: boolean;
   contentRepo: string;
   contentRef: string;
@@ -346,6 +352,7 @@ function ReplayFileView({
   onAdd: (comment: Omit<PendingComment, "id">) => void;
   onUpdate: (id: string, body: string) => void;
   onDelete: (id: string) => void;
+  onGoToStep: (step: number) => void;
 }) {
   const [target, setTarget] = useState<{ line: number; side: "LEFT" | "RIGHT"; index: number | null } | null>(null);
   const [body, setBody] = useState("");
@@ -368,9 +375,9 @@ function ReplayFileView({
       ...hunk,
       originalIndex,
       sourceLines: hunk.lines,
-      lines: showFullDiff
-        ? hunk.lines
-        : hunk.lines.filter((line) => line.type === "context" || (line.changedIndex !== null && currentRange && line.changedIndex >= currentRange.start && line.changedIndex <= currentRange.end)),
+      // Keep every row in the active hunk mounted so adjacent replay steps do
+      // not make the line-number geometry jump. Future code is masked below.
+      lines: hunk.lines,
     }))
     .filter((hunk) => showFullDiff || hunk.sourceLines.some((line) => line.changedIndex !== null && currentRange && line.changedIndex >= currentRange.start && line.changedIndex <= currentRange.end));
   useEffect(() => {
@@ -496,18 +503,39 @@ function ReplayFileView({
             <div className="hunk-row"><span /><span /><code>{hunk.header}</code></div>
             {hunk.lines.map((line, lineIndex) => {
               const current = line.changedIndex !== null && currentRange && line.changedIndex >= currentRange.start && line.changedIndex <= currentRange.end;
+              const lineStep = line.changedIndex === null ? undefined : changeSteps.get(line.changedIndex);
+              const past = !showFullDiff && lineStep !== undefined && lineStep < step;
+              const future = !showFullDiff && lineStep !== undefined && lineStep > step;
+              const previousLine = hunk.lines[lineIndex - 1];
+              const previousLineStep = previousLine?.changedIndex === null || previousLine?.changedIndex === undefined
+                ? undefined
+                : changeSteps.get(previousLine.changedIndex);
+              const startsFutureGroup = future && previousLineStep !== lineStep;
+              const futureChunk = lineStep === undefined ? undefined : replayChunks[lineStep];
               const anchor = commentTarget(line);
               const anchored = fileComments.filter((comment) => comment.line === anchor.line && comment.side === anchor.side);
               const composing = target?.line === anchor.line && target.side === anchor.side;
               return (
                 <Fragment key={`${hunk.originalIndex}-${lineIndex}`}>
-                  <div className={`diff-row ${line.type} ${current ? "current" : ""}`}>
-                    <button className="add-comment" onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`Comment on line ${anchor.line}`}><span>+</span></button>
+                  <div className={`diff-row ${line.type} ${current ? "current" : ""} ${past ? "past-change" : ""} ${future ? "future-change" : ""}`}>
+                    {future
+                      ? <span className="future-change-gutter" />
+                      : <button className="add-comment" onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`Comment on line ${anchor.line}`}><span>+</span></button>}
                     <span className="line-number">{line.oldLine ?? ""}</span>
                     <span className="line-number">{line.newLine ?? ""}</span>
-                    <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{renderCode(highlightedHunks[hunk.originalIndex]?.[hunk.sourceLines.indexOf(line)], line.text)}</code>
+                    {future ? (
+                      <code className="future-change-note">
+                        {startsFutureGroup && futureChunk ? (
+                          <button onClick={() => onGoToStep(lineStep)} title={`Go to Step ${lineStep + 1}: ${futureChunk.title}`}>
+                            <ArrowRight size={11} /> Later in Step {lineStep + 1} <span>· {futureChunk.title}</span>
+                          </button>
+                        ) : <span aria-hidden="true" />}
+                      </code>
+                    ) : (
+                      <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{renderCode(highlightedHunks[hunk.originalIndex]?.[hunk.sourceLines.indexOf(line)], line.text)}</code>
+                    )}
                   </div>
-                  {anchored.map((comment) => editingCommentId === comment.id ? (
+                  {!future && anchored.map((comment) => editingCommentId === comment.id ? (
                     <div className="inline-composer inline-comment-editor" key={comment.id}>
                       <textarea autoFocus value={editedBody} onChange={(event) => setEditedBody(event.target.value)} onKeyDown={(event) => {
                         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveEditedComment(); }
@@ -524,7 +552,7 @@ function ReplayFileView({
                       </div>
                     </div>
                   ))}
-                  {composing && (
+                  {!future && composing && (
                     <div className="inline-composer">
                       <textarea autoFocus value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitComment(); } }} placeholder={`Leave a comment on ${file.path}:${anchor.line}`} />
                       <div><button className="text-button" onClick={() => { setTarget(null); setBody(""); }}>Cancel</button><button className="primary-button compact" onClick={submitComment} disabled={!body.trim()}>Add pending comment</button></div>
@@ -779,6 +807,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
 
   const files = useMemo(() => parseUnifiedDiff(pull?.diff ?? ""), [pull?.diff]);
   const chunk = replay?.chunks[step] ?? null;
+  const changeSteps = useMemo(() => replayStepMap(replay?.chunks ?? []), [replay?.chunks]);
   const go = (value: number) => {
     if (!replay) return;
     setPlaying(false); setStep(Math.max(0, Math.min(replay.chunks.length - 1, value)));
@@ -881,7 +910,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
               <h2>{chunk.title}</h2><p>{chunk.description}</p>
             </div>}
             <div className="diff-scroll" ref={scrollRef}>
-              {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRange={chunk ? { start: chunk.start, end: chunk.end } : null} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onUpdate={updateComment} onDelete={deleteComment} />)}
+              {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRange={chunk ? { start: chunk.start, end: chunk.end } : null} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
             </div>
           </section>
           <ReviewSidebar repo={repo} pull={pull} comments={comments} event={reviewEvent} summary={reviewSummary} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />

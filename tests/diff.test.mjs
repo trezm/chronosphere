@@ -34,3 +34,19 @@ test("normalizes incomplete model output so every changed line is replayed", () 
   assert.equal(map.size, 3);
   assert.ok([...map.keys()].every((index) => index >= 1 && index <= 3));
 });
+
+test("maps changed lines to their reconstructed step rather than diff order", () => {
+  const files = parseUnifiedDiff(sample);
+  const chunks = normalizeReplayChunks(
+    [
+      { start: 2, end: 3, title: "Add the replacement", description: "Adds the new implementation." },
+      { start: 1, end: 1, title: "Remove the old return", description: "Removes the old implementation." },
+    ],
+    files,
+  );
+  const map = replayStepMap(chunks);
+
+  assert.equal(map.get(2), 0);
+  assert.equal(map.get(3), 0);
+  assert.equal(map.get(1), 1);
+});
