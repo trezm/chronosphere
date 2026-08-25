@@ -74,6 +74,7 @@ export interface ReplayChunk {
   end: number;
   title: string;
   description: string;
+  impactful?: boolean;
 }
 
 export interface ReplayResult {

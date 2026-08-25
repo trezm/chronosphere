@@ -91,12 +91,12 @@ export function normalizeReplayChunks(
   const claimed = new Set<number>();
   const chunks: ReplayChunk[] = [];
 
-  const addRange = (start: number, end: number, title: string, description: string) => {
+  const addRange = (start: number, end: number, title: string, description: string, impactful = false) => {
     let segmentStart: number | null = null;
     let segmentFile = "";
     const close = (segmentEnd: number) => {
       if (segmentStart === null) return;
-      chunks.push({ file: segmentFile, start: segmentStart, end: segmentEnd, title, description });
+      chunks.push({ file: segmentFile, start: segmentStart, end: segmentEnd, title, description, impactful });
       segmentStart = null;
     };
     for (let index = start; index <= end; index++) {
@@ -126,7 +126,8 @@ export function normalizeReplayChunks(
       start,
       end,
       String(candidate.title ?? "").trim() || "Implementation step",
-      String(candidate.description ?? "").trim()
+      String(candidate.description ?? "").trim(),
+      candidate.impactful === true
     );
   }
 

@@ -50,3 +50,17 @@ test("maps changed lines to their reconstructed step rather than diff order", ()
   assert.equal(map.get(3), 0);
   assert.equal(map.get(1), 1);
 });
+
+test("preserves explicit model impact markings and defaults other steps to false", () => {
+  const files = parseUnifiedDiff(sample);
+  const chunks = normalizeReplayChunks(
+    [
+      { start: 2, end: 3, title: "Add the core calculation", description: "Changes the result.", impactful: true },
+      { start: 1, end: 1, title: "Remove the old return", description: "Removes the old implementation." },
+    ],
+    files,
+  );
+
+  assert.equal(chunks[0].impactful, true);
+  assert.equal(chunks[1].impactful, false);
+});

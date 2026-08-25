@@ -12,6 +12,7 @@ The replay is explicitly a model-generated reconstruction, not recorded history.
 - Involvement filters for authored, assigned, and review-requested PRs
 - Author, assignee, and requested-reviewer context
 - LLM-generated replay timeline with playable/scrubbable diff states
+- Model-selected high-impact markers for the most consequential replay steps
 - Pending inline review comments carried across replay steps
 - In-progress reviews cached in the browser and restored across reloads
 - GitHub comment, approval, and request-changes reviews

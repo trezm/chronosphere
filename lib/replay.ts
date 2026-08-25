@@ -14,7 +14,8 @@ Rules:
 - Cover every numbered line exactly once: no gaps and no overlaps.
 - Deleted lines are numbered too and belong with the step that removes or replaces them.
 - Narrate what the code does in plain language. Do not review, judge, or invent intent.
-- Return only JSON matching: {"chunks":[{"start":1,"end":3,"title":"Short title","description":"One or two sentences."}]}`;
+- Mark only the few most consequential steps as impactful: steps that establish a central behavior or contract, affect many downstream callers, or carry notable correctness or security consequences. Most steps should be false.
+- Return only JSON matching: {"chunks":[{"start":1,"end":3,"title":"Short title","description":"One or two sentences.","impactful":true}]}`;
 
 function listing(diff: string): { text: string; truncated: boolean } {
   const files = parseUnifiedDiff(diff);

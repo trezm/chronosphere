@@ -25,6 +25,7 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Star,
   Sun,
   Trash2,
   UserRoundCheck,
@@ -880,10 +881,16 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
             <div className="timeline-title"><span>Reconstruction</span><em>{replay.chunks.length} steps</em></div>
             <ol>
               {replay.chunks.map((item, index) => (
-                <li className={index === step ? "active" : index < step ? "past" : ""} key={`${item.file}-${item.start}`}>
+                <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={`${item.file}-${item.start}`}>
                   <button onClick={() => go(index)}>
-                    <span className="step-marker">{index < step ? <Check size={12} /> : index + 1}</span>
-                    <span><strong>{item.title}</strong><code>{item.file}</code></span>
+                    <span className="step-marker">
+                      {index < step ? <Check size={12} /> : index + 1}
+                      {item.impactful && <Star className="impact-star" size={10} fill="currentColor" aria-hidden="true" />}
+                    </span>
+                    <span>
+                      <span className="step-title-row"><strong>{item.title}</strong>{item.impactful && <span className="impact-badge">High impact</span>}</span>
+                      <code>{item.file}</code>
+                    </span>
                   </button>
                 </li>
               ))}
@@ -901,7 +908,11 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
             </header>
             {chunk && <div className="step-narration">
               <div className="step-narration-top">
-                <div className="step-meta"><span>Step {step + 1}</span><code>{chunk.file}</code></div>
+                <div className="step-meta">
+                  <span>Step {step + 1}</span>
+                  {chunk.impactful && <span className="impact-label"><Star size={10} fill="currentColor" aria-hidden="true" />High impact</span>}
+                  <code>{chunk.file}</code>
+                </div>
                 <div className="diff-scope-toggle" role="group" aria-label="Diff scope">
                   <button className={!showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(false)} aria-pressed={!showFullDiff}>This step</button>
                   <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>Full PR</button>

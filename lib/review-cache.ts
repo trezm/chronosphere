@@ -40,7 +40,8 @@ function isReplay(value: unknown): value is ReplayResult {
       && typeof chunk.start === "number"
       && typeof chunk.end === "number"
       && typeof chunk.title === "string"
-      && typeof chunk.description === "string");
+      && typeof chunk.description === "string"
+      && (chunk.impactful === undefined || typeof chunk.impactful === "boolean"));
 }
 
 function isPendingComment(value: unknown): value is PendingComment {
