@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { defaultOpenRouterModel } from "@/lib/config";
+import { defaultOpenRouterModel, defaultReviewerModel, defaultScoutModel } from "@/lib/config";
 import { readSession } from "@/lib/session";
 
 export async function GET(request: NextRequest) {
@@ -24,6 +24,8 @@ export async function GET(request: NextRequest) {
     },
     defaults: {
       model: defaultOpenRouterModel(),
+      scoutModel: defaultScoutModel(),
+      reviewerModel: defaultReviewerModel(),
     },
   });
 }

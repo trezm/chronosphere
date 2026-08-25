@@ -1,4 +1,4 @@
-import type { PendingComment, ReplayResult } from "./types";
+import type { AiReviewResult, PendingComment, ReplayResult } from "./types";
 
 export type ReviewEvent = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
 
@@ -11,6 +11,9 @@ export interface InProgressReview {
   event: ReviewEvent;
   model: string;
   showFullDiff: boolean;
+  aiReview?: AiReviewResult;
+  scoutModel?: string;
+  reviewerModel?: string;
 }
 
 type StoredReview = InProgressReview & {
@@ -55,6 +58,19 @@ function isPendingComment(value: unknown): value is PendingComment {
     && typeof comment.step === "number";
 }
 
+function isAiReview(value: unknown): value is AiReviewResult {
+  if (!value || typeof value !== "object") return false;
+  const review = value as Partial<AiReviewResult>;
+  return typeof review.scoutModel === "string"
+    && typeof review.reviewerModel === "string"
+    && typeof review.summary === "string"
+    && typeof review.truncated === "boolean"
+    && !!review.scout
+    && typeof review.scout.intent === "string"
+    && Array.isArray(review.scout.focusAreas)
+    && Array.isArray(review.findings);
+}
+
 function isStoredReview(value: unknown): value is StoredReview {
   if (!value || typeof value !== "object") return false;
   const review = value as Partial<StoredReview>;
@@ -70,7 +86,10 @@ function isStoredReview(value: unknown): value is StoredReview {
     && typeof review.summary === "string"
     && isReviewEvent(review.event)
     && typeof review.model === "string"
-    && typeof review.showFullDiff === "boolean";
+    && typeof review.showFullDiff === "boolean"
+    && (review.aiReview === undefined || isAiReview(review.aiReview))
+    && (review.scoutModel === undefined || typeof review.scoutModel === "string")
+    && (review.reviewerModel === undefined || typeof review.reviewerModel === "string");
 }
 
 export function loadInProgressReview(storage: Storage, key: string, headSha: string): InProgressReview | null {
@@ -83,7 +102,7 @@ export function loadInProgressReview(storage: Storage, key: string, headSha: str
       storage.removeItem(key);
       return null;
     }
-    return {
+    const review: InProgressReview = {
       headSha: stored.headSha,
       replay: stored.replay,
       step: stored.step,
@@ -93,6 +112,10 @@ export function loadInProgressReview(storage: Storage, key: string, headSha: str
       model: stored.model,
       showFullDiff: stored.showFullDiff,
     };
+    if (stored.aiReview) review.aiReview = stored.aiReview;
+    if (stored.scoutModel) review.scoutModel = stored.scoutModel;
+    if (stored.reviewerModel) review.reviewerModel = stored.reviewerModel;
+    return review;
   } catch {
     storage.removeItem(key);
     return null;

@@ -13,6 +13,8 @@ The replay is explicitly a model-generated reconstruction, not recorded history.
 - Author, assignee, and requested-reviewer context
 - LLM-generated replay timeline with playable/scrubbable diff states
 - Model-selected high-impact markers for the most consequential replay steps
+- On-demand two-stage AI review: a scout triages the diff, then a reviewer returns high-confidence findings
+- AI findings that can be staged individually or in bulk as editable GitHub review comments
 - Pending inline review comments carried across replay steps
 - In-progress reviews cached in the browser and restored across reloads
 - GitHub comment, approval, and request-changes reviews
@@ -39,7 +41,7 @@ Create a Railway service from this repository and set:
 - `GITHUB_CLIENT_ID`
 - `GITHUB_CLIENT_SECRET`
 - `SESSION_SECRET`
-- optionally `OPENROUTER_MODEL`
+- optionally `OPENROUTER_MODEL`, `OPENROUTER_SCOUT_MODEL`, and `OPENROUTER_REVIEWER_MODEL`
 
 Update the GitHub OAuth App homepage and callback to the same public origin. Railway reads `railway.json`, lets Railpack install dependencies, runs `npm run build`, starts on Railway's `$PORT`, and checks `/api/auth/session` for health.
 

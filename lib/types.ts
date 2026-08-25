@@ -83,6 +83,41 @@ export interface ReplayResult {
   truncated: boolean;
 }
 
+export type FindingSeverity = "critical" | "high" | "medium" | "low";
+export type FindingCategory = "bug" | "security" | "performance" | "correctness" | "design" | "test";
+export type RiskLevel = "high" | "medium" | "low";
+
+export interface ScoutFocusArea {
+  file: string;
+  reason: string;
+  risk: RiskLevel;
+}
+
+export interface ScoutResult {
+  intent: string;
+  focusAreas: ScoutFocusArea[];
+}
+
+export interface ReviewFinding {
+  file: string;
+  /** Best-guess line in the new version of the file. */
+  line: number;
+  severity: FindingSeverity;
+  category: FindingCategory;
+  title: string;
+  description: string;
+  suggestion: string;
+}
+
+export interface AiReviewResult {
+  scoutModel: string;
+  reviewerModel: string;
+  scout: ScoutResult;
+  summary: string;
+  findings: ReviewFinding[];
+  truncated: boolean;
+}
+
 export interface PendingComment {
   id: string;
   path: string;

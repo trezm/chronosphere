@@ -62,3 +62,21 @@ test("discards malformed cached reviews", () => {
   assert.equal(loadInProgressReview(storage, key, review.headSha), null);
   assert.equal(storage.length, 0);
 });
+
+test("restores an AI review with the draft it belongs to", () => {
+  const storage = memoryStorage();
+  const key = reviewCacheKey("Pete", "Acme/Widget", 42);
+  const aiReview = {
+    scoutModel: "openai/gpt-5-mini",
+    reviewerModel: "anthropic/claude-sonnet-4",
+    scout: { intent: "Check the parser.", focusAreas: [{ file: "app.ts", reason: "Input boundary", risk: "high" }] },
+    summary: "One issue found.",
+    findings: [{ file: "app.ts", line: 2, severity: "high", category: "correctness", title: "Unchecked input", description: "The input can be empty.", suggestion: "Validate it." }],
+    truncated: false,
+  };
+  const withAiReview = { ...review, aiReview, scoutModel: aiReview.scoutModel, reviewerModel: aiReview.reviewerModel };
+
+  saveInProgressReview(storage, key, withAiReview);
+
+  assert.deepEqual(loadInProgressReview(storage, key, review.headSha), withAiReview);
+});

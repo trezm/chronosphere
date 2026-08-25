@@ -35,6 +35,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import Image from "next/image";
 import { api, isApiErrorWithStatus } from "@/lib/api";
 import { parseUnifiedDiff, replayStepMap } from "@/lib/diff";
+import { findingAnchor, findingToCommentBody, sortFindings } from "@/lib/review-findings";
 import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
 import {
   clearInProgressReview,
@@ -46,19 +47,21 @@ import {
 import type {
   DiffFile,
   DiffLine,
+  AiReviewResult,
   PendingComment,
   PullRequestDetail,
   PullRequestSummary,
   ReplayChunk,
   ReplayResult,
   Repository,
+  ReviewFinding,
 } from "@/lib/types";
 
 type AuthState = {
   github: { connected: boolean; user: { login: string; name: string | null; avatarUrl: string } | null };
   openrouter: { connected: boolean; userId: string | null };
   configured: { github: boolean };
-  defaults: { model: string };
+  defaults: { model: string; scoutModel: string; reviewerModel: string };
 };
 
 function timeAgo(value: string): string {
@@ -576,8 +579,20 @@ function ReviewSidebar({
   repo,
   pull,
   comments,
+  files,
+  aiReview,
+  aiReviewBusy,
+  aiReviewError,
+  scoutModel,
+  reviewerModel,
   event,
   summary,
+  onRequestAiReview,
+  onScoutModelChange,
+  onReviewerModelChange,
+  onAddFinding,
+  onAddAllFindings,
+  onGoToFinding,
   onEventChange,
   onSummaryChange,
   onUpdateComment,
@@ -588,8 +603,20 @@ function ReviewSidebar({
   repo: Repository;
   pull: PullRequestDetail;
   comments: PendingComment[];
+  files: DiffFile[];
+  aiReview: AiReviewResult | null;
+  aiReviewBusy: boolean;
+  aiReviewError: string | null;
+  scoutModel: string;
+  reviewerModel: string;
   event: ReviewEvent;
   summary: string;
+  onRequestAiReview: () => void;
+  onScoutModelChange: (model: string) => void;
+  onReviewerModelChange: (model: string) => void;
+  onAddFinding: (finding: ReviewFinding) => void;
+  onAddAllFindings: (findings: ReviewFinding[]) => void;
+  onGoToFinding: (finding: ReviewFinding) => void;
   onEventChange: (event: ReviewEvent) => void;
   onSummaryChange: (summary: string) => void;
   onUpdateComment: (id: string, body: string) => void;
@@ -654,9 +681,61 @@ function ReviewSidebar({
   const mergeLabel = pull.merged ? "Merged" : pull.state === "closed" ? "Closed" : pull.draft ? "Draft" : pull.mergeable === false ? "Conflicts" : pull.mergeable === null ? "Checking" : "Ready to merge";
   const mergeTone = pull.merged ? "purple" : pull.mergeable === false ? "red" : pull.mergeable === true ? "green" : "amber";
   const canAttemptMerge = pull.state === "open" && !pull.draft && pull.mergeable !== false && pull.allowedMergeMethods.length > 0;
+  const findings = sortFindings(aiReview?.findings ?? []);
+  const readyFindings = findings.filter((finding) => {
+    const anchor = findingAnchor(files, finding);
+    const body = findingToCommentBody(finding);
+    return anchor && !comments.some((comment) => comment.path === anchor.path && comment.line === anchor.line && comment.side === anchor.side && comment.body === body);
+  });
 
   return (
     <aside className="review-sidebar">
+      <section className="review-section ai-review-section">
+        <div className="section-title"><span><Sparkles size={13} /> AI review</span>{aiReview && <em>{findings.length}</em>}</div>
+        {!aiReview ? (
+          <>
+            <p className="sidebar-empty">A scout triages the diff, then a reviewer returns only high-confidence, actionable findings.</p>
+            <div className="ai-models">
+              <label><span>Scout model</span><input value={scoutModel} onChange={(event) => onScoutModelChange(event.target.value)} spellCheck={false} /></label>
+              <label><span>Reviewer model</span><input value={reviewerModel} onChange={(event) => onReviewerModelChange(event.target.value)} spellCheck={false} /></label>
+            </div>
+            {aiReviewError && <div className="ai-review-error"><XCircle size={13} />{aiReviewError}</div>}
+            <button className="ai-review-button" onClick={onRequestAiReview} disabled={aiReviewBusy || !scoutModel.trim() || !reviewerModel.trim()}>
+              {aiReviewBusy ? <><span className="spinner" />Scout and reviewer are analyzing…</> : <><Sparkles size={14} />Request AI review</>}
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="ai-review-meta"><span>Scout <code>{aiReview.scoutModel}</code></span><span>Reviewer <code>{aiReview.reviewerModel}</code></span></div>
+            {aiReview.truncated && <p className="ai-review-warning">The diff was truncated for the models, so coverage may be incomplete.</p>}
+            <p className="ai-review-summary">{aiReview.summary || "No summary returned."}</p>
+            {aiReview.scout.intent && (
+              <details className="scout-details">
+                <summary>Scout triage · {aiReview.scout.focusAreas.length} focus area{aiReview.scout.focusAreas.length === 1 ? "" : "s"}</summary>
+                <p>{aiReview.scout.intent}</p>
+                {aiReview.scout.focusAreas.map((area, index) => <div className="focus-area" key={`${area.file}-${index}`}><span className={`risk ${area.risk}`}>{area.risk}</span><code>{area.file}</code><p>{area.reason}</p></div>)}
+              </details>
+            )}
+            <div className="findings-heading"><span>{findings.length} finding{findings.length === 1 ? "" : "s"}</span>{readyFindings.length > 0 && <button onClick={() => onAddAllFindings(readyFindings)}>Add all {readyFindings.length}</button>}</div>
+            {!findings.length && <p className="sidebar-empty no-findings"><CheckCircle2 size={14} />The reviewer had nothing high-confidence to report.</p>}
+            <div className="finding-list">
+              {findings.map((finding, index) => {
+                const anchor = findingAnchor(files, finding);
+                const staged = !!anchor && comments.some((comment) => comment.path === anchor.path && comment.line === anchor.line && comment.side === anchor.side && comment.body === findingToCommentBody(finding));
+                return <article className="finding-card" key={`${finding.file}-${finding.line}-${index}`}>
+                  <div className="finding-labels"><span className={`severity ${finding.severity}`}>{finding.severity}</span><span>{finding.category}</span></div>
+                  <button className="finding-jump" onClick={() => onGoToFinding(finding)}><strong>{finding.title}</strong><code>{finding.file}:{finding.line}</code></button>
+                  <p>{finding.description}</p>
+                  {finding.suggestion && <div className="finding-suggestion"><span>Suggestion</span><p>{finding.suggestion}</p></div>}
+                  {staged ? <span className="finding-staged"><Check size={11} />Added to review</span> : anchor ? <button className="finding-add" onClick={() => onAddFinding(finding)}>+ Add to review</button> : <span className="finding-unanchored">Not on a diff line</span>}
+                </article>;
+              })}
+            </div>
+            {aiReviewError && <div className="ai-review-error"><XCircle size={13} />{aiReviewError}</div>}
+            <button className="text-button ai-rerun" onClick={onRequestAiReview} disabled={aiReviewBusy}>{aiReviewBusy ? "Reviewing again…" : "Run review again"}</button>
+          </>
+        )}
+      </section>
       <section className="review-section pending-section">
         <div className="section-title"><span>Pending comments</span><em>{comments.length}</em></div>
         <div className="comment-list">
@@ -713,7 +792,7 @@ function ReviewSidebar({
   );
 }
 
-function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo: Repository; summary: PullRequestSummary; defaultModel: string; viewer: string; onBack: () => void }) {
+function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, onBack }: { repo: Repository; summary: PullRequestSummary; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; onBack: () => void }) {
   const [pull, setPull] = useState<PullRequestDetail | null>(null);
   const [replay, setReplay] = useState<ReplayResult | null>(null);
   const [step, setStep] = useState(0);
@@ -725,6 +804,11 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState(defaultModel);
+  const [scoutModel, setScoutModel] = useState(defaultScoutModel);
+  const [reviewerModel, setReviewerModel] = useState(defaultReviewerModel);
+  const [aiReview, setAiReview] = useState<AiReviewResult | null>(null);
+  const [aiReviewBusy, setAiReviewBusy] = useState(false);
+  const [aiReviewError, setAiReviewError] = useState<string | null>(null);
   const [showFullDiff, setShowFullDiff] = useState(false);
   const [cacheReady, setCacheReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -750,6 +834,9 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
             setReviewEvent(cached.event);
             setModel(cached.model);
             setShowFullDiff(cached.showFullDiff);
+            setAiReview(cached.aiReview ?? null);
+            setScoutModel(cached.scoutModel ?? cached.aiReview?.scoutModel ?? defaultScoutModel);
+            setReviewerModel(cached.reviewerModel ?? cached.aiReview?.reviewerModel ?? defaultReviewerModel);
           }
         } catch {
           // Browser privacy settings and storage quotas must not block review work.
@@ -759,11 +846,11 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
       .catch((error: Error) => { if (active) setError(error.message); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [repo.fullName, summary.number, cacheKey]);
+  }, [repo.fullName, summary.number, cacheKey, defaultScoutModel, defaultReviewerModel]);
   useEffect(() => {
     if (!cacheReady || !pull) return;
     try {
-      if (!comments.length && !reviewSummary.trim()) {
+      if (!comments.length && !reviewSummary.trim() && !aiReview) {
         clearInProgressReview(window.localStorage, cacheKey);
         return;
       }
@@ -779,11 +866,14 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
         event: reviewEvent,
         model,
         showFullDiff,
+        aiReview: aiReview ?? undefined,
+        scoutModel,
+        reviewerModel,
       });
     } catch {
       // Keep the in-memory review usable if browser storage is unavailable.
     }
-  }, [cacheReady, cacheKey, comments, model, pull, replay, reviewEvent, reviewSummary, showFullDiff, step]);
+  }, [aiReview, cacheReady, cacheKey, comments, model, pull, replay, reviewEvent, reviewSummary, reviewerModel, scoutModel, showFullDiff, step]);
   useEffect(() => {
     if (!playing || !replay) return;
     if (step >= replay.chunks.length - 1) {
@@ -825,6 +915,45 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
   };
   const deleteComment = (id: string) => {
     setComments((items) => items.filter((item) => item.id !== id));
+  };
+  const requestAiReview = async () => {
+    if (!pull || aiReviewBusy) return;
+    setAiReviewBusy(true);
+    setAiReviewError(null);
+    try {
+      const result = await api<{ review: AiReviewResult }>("/api/ai-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repo: repo.fullName,
+          number: pull.number,
+          headSha: pull.headSha,
+          scoutModel,
+          reviewerModel,
+        }),
+      });
+      setAiReview(result.review);
+    } catch (error) {
+      setAiReviewError(error instanceof Error ? error.message : "Could not complete the AI review.");
+    } finally {
+      setAiReviewBusy(false);
+    }
+  };
+  const addFinding = (finding: ReviewFinding) => {
+    const anchor = findingAnchor(files, finding);
+    if (!anchor) return;
+    const findingStep = anchor.changedIndex === null ? step : (changeSteps.get(anchor.changedIndex) ?? step);
+    const body = findingToCommentBody(finding);
+    setComments((items) => items.some((comment) => comment.path === anchor.path && comment.line === anchor.line && comment.side === anchor.side && comment.body === body)
+      ? items
+      : [...items, { id: crypto.randomUUID(), path: anchor.path, line: anchor.line, side: anchor.side, body, step: findingStep }]);
+  };
+  const addAllFindings = (findings: ReviewFinding[]) => findings.forEach(addFinding);
+  const goToFinding = (finding: ReviewFinding) => {
+    const anchor = findingAnchor(files, finding);
+    if (!anchor) return;
+    setShowFullDiff(anchor.changedIndex === null);
+    if (anchor.changedIndex !== null) go(changeSteps.get(anchor.changedIndex) ?? step);
   };
 
   useEffect(() => {
@@ -924,7 +1053,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, viewer, onBack }: { repo
               {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRange={chunk ? { start: chunk.start, end: chunk.end } : null} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
             </div>
           </section>
-          <ReviewSidebar repo={repo} pull={pull} comments={comments} event={reviewEvent} summary={reviewSummary} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
+          <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
         </div>
       )}
     </main>
@@ -937,7 +1066,7 @@ export default function Home() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   useEffect(() => {
-    api<AuthState>("/api/auth/session").then(setAuth).catch(() => setAuth({ github: { connected: false, user: null }, openrouter: { connected: false, userId: null }, configured: { github: false }, defaults: { model: "openai/gpt-5-mini" } }));
+    api<AuthState>("/api/auth/session").then(setAuth).catch(() => setAuth({ github: { connected: false, user: null }, openrouter: { connected: false, userId: null }, configured: { github: false }, defaults: { model: "openai/gpt-5-mini", scoutModel: "openai/gpt-5-mini", reviewerModel: "openai/gpt-5-mini" } }));
   }, []);
   const toggleTheme = () => {
     const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
@@ -961,7 +1090,7 @@ export default function Home() {
   return (
     <div className="app-frame">
       <AppHeader auth={auth} onToggleTheme={toggleTheme} onLogout={logout} />
-      {!ready ? <ConnectionGate auth={auth} connectionError={connectionError} /> : selection ? <ReplayWorkspace repo={selection.repo} summary={selection.pull} defaultModel={auth.defaults.model} viewer={auth.github.user!.login} onBack={() => setSelection(null)} /> : <RepositoryPicker viewer={auth.github.user!} onOpen={(repo, pull) => setSelection({ repo, pull })} onReconnectRequired={requireGithubReconnect} />}
+      {!ready ? <ConnectionGate auth={auth} connectionError={connectionError} /> : selection ? <ReplayWorkspace repo={selection.repo} summary={selection.pull} defaultModel={auth.defaults.model} defaultScoutModel={auth.defaults.scoutModel} defaultReviewerModel={auth.defaults.reviewerModel} viewer={auth.github.user!.login} onBack={() => setSelection(null)} /> : <RepositoryPicker viewer={auth.github.user!} onOpen={(repo, pull) => setSelection({ repo, pull })} onReconnectRequired={requireGithubReconnect} />}
     </div>
   );
 }
