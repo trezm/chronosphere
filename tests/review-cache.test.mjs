@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   clearInProgressReview,
+  isInProgressReview,
   loadInProgressReview,
   reviewCacheKey,
   saveInProgressReview,
@@ -79,4 +80,24 @@ test("restores an AI review with the draft it belongs to", () => {
   saveInProgressReview(storage, key, withAiReview);
 
   assert.deepEqual(loadInProgressReview(storage, key, review.headSha), withAiReview);
+});
+
+test("validates durable PR state before it reaches the client", () => {
+  assert.equal(isInProgressReview(review), true);
+  assert.equal(isInProgressReview({ ...review, step: -1 }), false);
+  assert.equal(isInProgressReview({
+    ...review,
+    comments: [{ ...review.comments[0], line: 0 }],
+  }), false);
+  assert.equal(isInProgressReview({
+    ...review,
+    aiReview: {
+      scoutModel: "openai/gpt-5-mini",
+      reviewerModel: "openai/gpt-5",
+      scout: { intent: "Inspect it.", focusAreas: [] },
+      summary: "A problem.",
+      findings: [{ file: "app.ts", line: 2, severity: "urgent", category: "bug", title: "Bad", description: "Bad.", suggestion: "Fix." }],
+      truncated: false,
+    },
+  }), false);
 });

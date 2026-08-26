@@ -42,6 +42,7 @@ import {
   loadInProgressReview,
   reviewCacheKey,
   saveInProgressReview,
+  type InProgressReview,
   type ReviewEvent,
 } from "@/lib/review-cache";
 import type {
@@ -832,8 +833,9 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
   const [aiReviewBusy, setAiReviewBusy] = useState(false);
   const [aiReviewError, setAiReviewError] = useState<string | null>(null);
   const [showFullDiff, setShowFullDiff] = useState(false);
-  const [cacheReady, setCacheReady] = useState(false);
+  const [stateReady, setStateReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stateRevisionRef = useRef(0);
   const cacheKey = useMemo(() => reviewCacheKey(viewer, repo.fullName, summary.number), [viewer, repo.fullName, summary.number]);
 
   const refreshPull = async () => {
@@ -842,44 +844,52 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
   };
   useEffect(() => {
     let active = true;
-    api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}`)
-      .then(({ pull }) => {
+    const load = async () => {
+      try {
+        const { pull } = await api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}`);
         if (!active) return;
         setPull(pull);
+        let cached: InProgressReview | null = null;
         try {
-          const cached = loadInProgressReview(window.localStorage, cacheKey, pull.headSha);
-          if (cached) {
-            setReplay(cached.replay);
-            setStep(Math.min(cached.step, Math.max(0, cached.replay.chunks.length - 1)));
-            setComments(cached.comments);
-            setReviewSummary(cached.summary);
-            setReviewEvent(cached.event);
-            setModel(cached.model);
-            setShowFullDiff(cached.showFullDiff);
-            setAiReview(cached.aiReview ?? null);
-            setScoutModel(cached.scoutModel ?? cached.aiReview?.scoutModel ?? defaultScoutModel);
-            setReviewerModel(cached.reviewerModel ?? cached.aiReview?.reviewerModel ?? defaultReviewerModel);
-          }
+          const remote = await api<{ state: InProgressReview | null; revision: number }>(
+            `/api/state?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}&headSha=${encodeURIComponent(pull.headSha)}`,
+          );
+          cached = remote.state;
+          stateRevisionRef.current = remote.revision;
         } catch {
-          // Browser privacy settings and storage quotas must not block review work.
+          // A local draft remains usable when the persistent store is temporarily unavailable.
         }
-        setCacheReady(true);
-      })
-      .catch((error: Error) => { if (active) setError(error.message); })
-      .finally(() => { if (active) setLoading(false); });
+        if (!cached) {
+          try { cached = loadInProgressReview(window.localStorage, cacheKey, pull.headSha); }
+          catch { /* Browser privacy settings must not block review work. */ }
+        }
+        if (cached) {
+          setReplay(cached.replay);
+          setStep(Math.min(cached.step, Math.max(0, cached.replay.chunks.length - 1)));
+          setComments(cached.comments);
+          setReviewSummary(cached.summary);
+          setReviewEvent(cached.event);
+          setModel(cached.model);
+          setShowFullDiff(cached.showFullDiff);
+          setAiReview(cached.aiReview ?? null);
+          setScoutModel(cached.scoutModel ?? cached.aiReview?.scoutModel ?? defaultScoutModel);
+          setReviewerModel(cached.reviewerModel ?? cached.aiReview?.reviewerModel ?? defaultReviewerModel);
+        }
+        setStateReady(true);
+      } catch (error) {
+        if (active) setError(error instanceof Error ? error.message : "Could not load the pull request.");
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+    void load();
     return () => { active = false; };
   }, [repo.fullName, summary.number, cacheKey, defaultScoutModel, defaultReviewerModel]);
   useEffect(() => {
-    if (!cacheReady || !pull) return;
-    try {
-      if (!comments.length && !reviewSummary.trim() && !aiReview) {
-        clearInProgressReview(window.localStorage, cacheKey);
-        return;
-      }
-      // A rebuild briefly removes the replay from memory; retain the last complete
-      // cached draft until its replacement is ready.
-      if (!replay) return;
-      saveInProgressReview(window.localStorage, cacheKey, {
+    // A rebuild briefly removes the replay from memory; retain the last complete
+    // state until its replacement is ready.
+    if (!stateReady || !pull || !replay) return;
+    const state: InProgressReview = {
         headSha: pull.headSha,
         replay,
         step,
@@ -891,11 +901,23 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
         aiReview: aiReview ?? undefined,
         scoutModel,
         reviewerModel,
-      });
-    } catch {
-      // Keep the in-memory review usable if browser storage is unavailable.
-    }
-  }, [aiReview, cacheReady, cacheKey, comments, model, pull, replay, reviewEvent, reviewSummary, reviewerModel, scoutModel, showFullDiff, step]);
+    };
+    const timer = window.setTimeout(async () => {
+      const revision = Math.max(stateRevisionRef.current + 1, Date.now());
+      stateRevisionRef.current = revision;
+      try {
+        await api("/api/state", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo: repo.fullName, number: summary.number, revision, state }),
+        });
+        try { clearInProgressReview(window.localStorage, cacheKey); } catch { /* Storage may be unavailable. */ }
+      } catch {
+        try { saveInProgressReview(window.localStorage, cacheKey, state); } catch { /* Keep the in-memory state usable. */ }
+      }
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [aiReview, cacheKey, comments, model, pull, replay, repo.fullName, reviewEvent, reviewSummary, reviewerModel, scoutModel, showFullDiff, stateReady, step, summary.number]);
   useEffect(() => {
     if (!playing || !replay) return;
     if (step >= replay.chunks.length - 1) {
@@ -928,7 +950,6 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
     scrollRef.current?.scrollTo({ top: 0 });
   };
   const completeReview = () => {
-    try { clearInProgressReview(window.localStorage, cacheKey); } catch { /* Storage may be unavailable. */ }
     setComments([]);
     setReviewSummary("");
     setReviewEvent("COMMENT");

@@ -16,7 +16,7 @@ The replay is explicitly a model-generated reconstruction, not recorded history.
 - On-demand two-stage AI review: a scout triages the diff, then a reviewer returns high-confidence findings
 - AI findings that can be staged individually or in bulk as editable GitHub review comments
 - Pending inline review comments carried across replay steps
-- In-progress reviews cached in the browser and restored across reloads
+- Durable per-user PR state for replay position, AI review results, and staged GitHub review drafts
 - GitHub comment, approval, and request-changes reviews
 - Merge, squash, and rebase actions pinned to the reviewed head SHA
 - Mergeability and conflict status
@@ -47,6 +47,6 @@ Update the GitHub OAuth App homepage and callback to the same public origin. Rai
 
 ## Security notes
 
-Provider credentials are encrypted with AES-GCM using `SESSION_SECRET` and stored only in secure, HTTP-only, same-site cookies. GitHub OAuth uses `state` and PKCE. OpenRouter OAuth uses PKCE. In-progress review text and its replay are stored in the browser's local storage, scoped to the signed-in GitHub user and pull request, and invalidated when the head commit changes. Merge calls include the pull request head SHA seen by the reviewer, so GitHub rejects the action if the branch changed in the meantime.
+Provider credentials are encrypted with AES-GCM using `SESSION_SECRET` and stored only in secure, HTTP-only, same-site cookies. GitHub OAuth uses `state` and PKCE. OpenRouter OAuth uses PKCE. Replay progress, AI results, and in-progress review text are stored in D1, scoped to the signed-in GitHub user and pull request, and invalidated when the head commit changes. Browser storage is used only as a temporary fallback and migration path for drafts created before durable storage was added. Merge calls include the pull request head SHA seen by the reviewer, so GitHub rejects the action if the branch changed in the meantime.
 
 For a larger public deployment, replace cookie-held provider credentials with a server-side session store and add organization-specific authorization and audit retention.
