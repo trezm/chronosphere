@@ -1,4 +1,4 @@
-import type { DiffFile, ReviewFinding } from "./types";
+import type { DiffFile, PendingComment, ReviewFinding } from "./types";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low"] as const;
 
@@ -31,4 +31,29 @@ export function findingAnchor(files: DiffFile[], finding: ReviewFinding): {
   const file = files.find((candidate) => candidate.path === finding.file);
   const line = file?.hunks.flatMap((hunk) => hunk.lines).find((candidate) => candidate.newLine === finding.line);
   return line ? { path: finding.file, line: finding.line, side: "RIGHT", changedIndex: line.changedIndex } : null;
+}
+
+export function findingsAtNewLine(
+  findings: ReviewFinding[],
+  path: string,
+  newLine: number | null,
+): ReviewFinding[] {
+  if (newLine === null) return [];
+  return findings.filter((finding) => finding.file === path && finding.line === newLine);
+}
+
+export function isFindingStaged(
+  comments: PendingComment[],
+  finding: ReviewFinding,
+  files: DiffFile[],
+): boolean {
+  const anchor = findingAnchor(files, finding);
+  if (!anchor) return false;
+  const body = findingToCommentBody(finding);
+  return comments.some((comment) =>
+    comment.path === anchor.path
+    && comment.line === anchor.line
+    && comment.side === anchor.side
+    && comment.body === body
+  );
 }

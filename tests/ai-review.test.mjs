@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeFindings, normalizeScout } from "../lib/ai-review-normalize.ts";
-import { findingAnchor, findingToCommentBody, sortFindings } from "../lib/review-findings.ts";
+import { findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, sortFindings } from "../lib/review-findings.ts";
 import { parseUnifiedDiff } from "../lib/diff.ts";
 
 const paths = new Set(["src/math.ts"]);
@@ -44,9 +44,16 @@ test("drops malformed findings and sorts usable findings by severity", () => {
 
 test("anchors findings only when the new line is present in the diff", () => {
   const files = parseUnifiedDiff(diff);
-  assert.deepEqual(findingAnchor(files, {
+  const finding = {
     file: "src/math.ts", line: 2, severity: "high", category: "correctness", title: "Finding", description: "Description", suggestion: "Suggestion",
-  }), { path: "src/math.ts", line: 2, side: "RIGHT", changedIndex: 2 });
+  };
+  assert.deepEqual(findingAnchor(files, finding), { path: "src/math.ts", line: 2, side: "RIGHT", changedIndex: 2 });
+  assert.deepEqual(findingsAtNewLine([finding], "src/math.ts", 2), [finding]);
+  assert.deepEqual(findingsAtNewLine([finding], "src/math.ts", null), []);
+  assert.equal(isFindingStaged([], finding, files), false);
+  assert.equal(isFindingStaged([{
+    id: "draft-1", path: "src/math.ts", line: 2, side: "RIGHT", body: findingToCommentBody(finding), step: 0,
+  }], finding, files), true);
   assert.equal(findingAnchor(files, {
     file: "src/math.ts", line: 99, severity: "high", category: "correctness", title: "Finding", description: "Description", suggestion: "Suggestion",
   }), null);

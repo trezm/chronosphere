@@ -35,7 +35,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import Image from "next/image";
 import { api, isApiErrorWithStatus } from "@/lib/api";
 import { parseUnifiedDiff, replayStepMap } from "@/lib/diff";
-import { findingAnchor, findingToCommentBody, sortFindings } from "@/lib/review-findings";
+import { findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, sortFindings } from "@/lib/review-findings";
 import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
 import {
   clearInProgressReview,
@@ -339,7 +339,9 @@ function ReplayFileView({
   contentRepo,
   contentRef,
   comments,
+  findings,
   onAdd,
+  onAddFinding,
   onUpdate,
   onDelete,
   onGoToStep,
@@ -353,7 +355,9 @@ function ReplayFileView({
   contentRepo: string;
   contentRef: string;
   comments: PendingComment[];
+  findings: ReviewFinding[];
   onAdd: (comment: Omit<PendingComment, "id">) => void;
+  onAddFinding: (finding: ReviewFinding) => void;
   onUpdate: (id: string, body: string) => void;
   onDelete: (id: string) => void;
   onGoToStep: (step: number) => void;
@@ -518,6 +522,7 @@ function ReplayFileView({
               const futureChunk = lineStep === undefined ? undefined : replayChunks[lineStep];
               const anchor = commentTarget(line);
               const anchored = fileComments.filter((comment) => comment.line === anchor.line && comment.side === anchor.side);
+              const anchoredFindings = findingsAtNewLine(findings, file.path, line.newLine);
               const composing = target?.line === anchor.line && target.side === anchor.side;
               return (
                 <Fragment key={`${hunk.originalIndex}-${lineIndex}`}>
@@ -539,6 +544,24 @@ function ReplayFileView({
                       <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{renderCode(highlightedHunks[hunk.originalIndex]?.[hunk.sourceLines.indexOf(line)], line.text)}</code>
                     )}
                   </div>
+                  {!future && anchoredFindings.map((finding, findingIndex) => {
+                    const staged = isFindingStaged(comments, finding, [file]);
+                    return (
+                      <div className="inline-finding" key={`${finding.title}-${findingIndex}`}>
+                        <div className="inline-finding-header">
+                          <Sparkles size={13} />
+                          <span className={`severity ${finding.severity}`}>{finding.severity}</span>
+                          <span>{finding.category}</span>
+                          <strong>{finding.title}</strong>
+                          {staged
+                            ? <span className="finding-staged"><Check size={11} />Added to review</span>
+                            : <button className="finding-add" onClick={() => onAddFinding(finding)}>+ Add to review</button>}
+                        </div>
+                        <p>{finding.description}</p>
+                        {finding.suggestion && <div className="inline-finding-suggestion"><span>Suggestion</span><p>{finding.suggestion}</p></div>}
+                      </div>
+                    );
+                  })}
                   {!future && anchored.map((comment) => editingCommentId === comment.id ? (
                     <div className="inline-composer inline-comment-editor" key={comment.id}>
                       <textarea autoFocus value={editedBody} onChange={(event) => setEditedBody(event.target.value)} onKeyDown={(event) => {
@@ -684,8 +707,7 @@ function ReviewSidebar({
   const findings = sortFindings(aiReview?.findings ?? []);
   const readyFindings = findings.filter((finding) => {
     const anchor = findingAnchor(files, finding);
-    const body = findingToCommentBody(finding);
-    return anchor && !comments.some((comment) => comment.path === anchor.path && comment.line === anchor.line && comment.side === anchor.side && comment.body === body);
+    return anchor && !isFindingStaged(comments, finding, files);
   });
 
   return (
@@ -721,7 +743,7 @@ function ReviewSidebar({
             <div className="finding-list">
               {findings.map((finding, index) => {
                 const anchor = findingAnchor(files, finding);
-                const staged = !!anchor && comments.some((comment) => comment.path === anchor.path && comment.line === anchor.line && comment.side === anchor.side && comment.body === findingToCommentBody(finding));
+                const staged = !!anchor && isFindingStaged(comments, finding, files);
                 return <article className="finding-card" key={`${finding.file}-${finding.line}-${index}`}>
                   <div className="finding-labels"><span className={`severity ${finding.severity}`}>{finding.severity}</span><span>{finding.category}</span></div>
                   <button className="finding-jump" onClick={() => onGoToFinding(finding)}><strong>{finding.title}</strong><code>{finding.file}:{finding.line}</code></button>
@@ -899,6 +921,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
   const files = useMemo(() => parseUnifiedDiff(pull?.diff ?? ""), [pull?.diff]);
   const chunk = replay?.chunks[step] ?? null;
   const changeSteps = useMemo(() => replayStepMap(replay?.chunks ?? []), [replay?.chunks]);
+  const aiFindings = useMemo(() => sortFindings(aiReview?.findings ?? []), [aiReview]);
   const go = (value: number) => {
     if (!replay) return;
     setPlaying(false); setStep(Math.max(0, Math.min(replay.chunks.length - 1, value)));
@@ -1050,7 +1073,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
               <h2>{chunk.title}</h2><p>{chunk.description}</p>
             </div>}
             <div className="diff-scroll" ref={scrollRef}>
-              {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRange={chunk ? { start: chunk.start, end: chunk.end } : null} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
+              {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRange={chunk ? { start: chunk.start, end: chunk.end } : null} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
             </div>
           </section>
           <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
