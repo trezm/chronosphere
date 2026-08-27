@@ -27,11 +27,11 @@ export function reviewCacheKey(viewer: string, repo: string, pullNumber: number)
   return `${CACHE_PREFIX}:${encodeURIComponent(viewer.toLowerCase())}:${encodeURIComponent(repo.toLowerCase())}:${pullNumber}`;
 }
 
-function isReviewEvent(value: unknown): value is ReviewEvent {
+export function isReviewEvent(value: unknown): value is ReviewEvent {
   return value === "COMMENT" || value === "APPROVE" || value === "REQUEST_CHANGES";
 }
 
-function isReplay(value: unknown): value is ReplayResult {
+export function isReplay(value: unknown): value is ReplayResult {
   if (!value || typeof value !== "object") return false;
   const replay = value as Partial<ReplayResult>;
   return typeof replay.model === "string"
@@ -40,27 +40,36 @@ function isReplay(value: unknown): value is ReplayResult {
     && replay.chunks.length > 0
     && replay.chunks.every((chunk) => !!chunk
       && typeof chunk.file === "string"
-      && typeof chunk.start === "number"
-      && typeof chunk.end === "number"
+      && Number.isInteger(chunk.start)
+      && chunk.start >= 0
+      && Number.isInteger(chunk.end)
+      && chunk.end >= chunk.start
       && typeof chunk.title === "string"
       && typeof chunk.description === "string"
       && (chunk.impactful === undefined || typeof chunk.impactful === "boolean"));
 }
 
-function isPendingComment(value: unknown): value is PendingComment {
+export function isPendingComment(value: unknown): value is PendingComment {
   if (!value || typeof value !== "object") return false;
   const comment = value as Partial<PendingComment>;
   return typeof comment.id === "string"
     && typeof comment.path === "string"
     && typeof comment.line === "number"
+    && Number.isInteger(comment.line)
+    && comment.line > 0
     && (comment.side === "LEFT" || comment.side === "RIGHT")
     && typeof comment.body === "string"
-    && typeof comment.step === "number";
+    && typeof comment.step === "number"
+    && Number.isInteger(comment.step)
+    && comment.step >= 0;
 }
 
-function isAiReview(value: unknown): value is AiReviewResult {
+export function isAiReview(value: unknown): value is AiReviewResult {
   if (!value || typeof value !== "object") return false;
   const review = value as Partial<AiReviewResult>;
+  const severities = new Set(["critical", "high", "medium", "low"]);
+  const categories = new Set(["bug", "security", "performance", "correctness", "design", "test"]);
+  const risks = new Set(["high", "medium", "low"]);
   return typeof review.scoutModel === "string"
     && typeof review.reviewerModel === "string"
     && typeof review.summary === "string"
@@ -68,15 +77,27 @@ function isAiReview(value: unknown): value is AiReviewResult {
     && !!review.scout
     && typeof review.scout.intent === "string"
     && Array.isArray(review.scout.focusAreas)
-    && Array.isArray(review.findings);
+    && review.scout.focusAreas.every((area) => !!area
+      && typeof area.file === "string"
+      && typeof area.reason === "string"
+      && risks.has(area.risk))
+    && Array.isArray(review.findings)
+    && review.findings.every((finding) => !!finding
+      && typeof finding.file === "string"
+      && typeof finding.line === "number"
+      && Number.isInteger(finding.line)
+      && finding.line > 0
+      && severities.has(finding.severity)
+      && categories.has(finding.category)
+      && typeof finding.title === "string"
+      && typeof finding.description === "string"
+      && typeof finding.suggestion === "string");
 }
 
-function isStoredReview(value: unknown): value is StoredReview {
+export function isInProgressReview(value: unknown): value is InProgressReview {
   if (!value || typeof value !== "object") return false;
-  const review = value as Partial<StoredReview>;
-  return review.version === 1
-    && typeof review.updatedAt === "number"
-    && typeof review.headSha === "string"
+  const review = value as Partial<InProgressReview>;
+  return typeof review.headSha === "string"
     && isReplay(review.replay)
     && typeof review.step === "number"
     && Number.isInteger(review.step)
@@ -90,6 +111,14 @@ function isStoredReview(value: unknown): value is StoredReview {
     && (review.aiReview === undefined || isAiReview(review.aiReview))
     && (review.scoutModel === undefined || typeof review.scoutModel === "string")
     && (review.reviewerModel === undefined || typeof review.reviewerModel === "string");
+}
+
+function isStoredReview(value: unknown): value is StoredReview {
+  if (!value || typeof value !== "object") return false;
+  const review = value as Partial<StoredReview>;
+  return review.version === 1
+    && typeof review.updatedAt === "number"
+    && isInProgressReview(review);
 }
 
 export function loadInProgressReview(storage: Storage, key: string, headSha: string): InProgressReview | null {
