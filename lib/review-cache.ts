@@ -27,11 +27,11 @@ export function reviewCacheKey(viewer: string, repo: string, pullNumber: number)
   return `${CACHE_PREFIX}:${encodeURIComponent(viewer.toLowerCase())}:${encodeURIComponent(repo.toLowerCase())}:${pullNumber}`;
 }
 
-function isReviewEvent(value: unknown): value is ReviewEvent {
+export function isReviewEvent(value: unknown): value is ReviewEvent {
   return value === "COMMENT" || value === "APPROVE" || value === "REQUEST_CHANGES";
 }
 
-function isReplay(value: unknown): value is ReplayResult {
+export function isReplay(value: unknown): value is ReplayResult {
   if (!value || typeof value !== "object") return false;
   const replay = value as Partial<ReplayResult>;
   return typeof replay.model === "string"
@@ -49,7 +49,7 @@ function isReplay(value: unknown): value is ReplayResult {
       && (chunk.impactful === undefined || typeof chunk.impactful === "boolean"));
 }
 
-function isPendingComment(value: unknown): value is PendingComment {
+export function isPendingComment(value: unknown): value is PendingComment {
   if (!value || typeof value !== "object") return false;
   const comment = value as Partial<PendingComment>;
   return typeof comment.id === "string"
@@ -64,7 +64,7 @@ function isPendingComment(value: unknown): value is PendingComment {
     && comment.step >= 0;
 }
 
-function isAiReview(value: unknown): value is AiReviewResult {
+export function isAiReview(value: unknown): value is AiReviewResult {
   if (!value || typeof value !== "object") return false;
   const review = value as Partial<AiReviewResult>;
   const severities = new Set(["critical", "high", "medium", "low"]);

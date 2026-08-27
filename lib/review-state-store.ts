@@ -1,10 +1,10 @@
-import { and, eq, lt, ne } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 import { getDb } from "@/db";
 import { pullRequestStates } from "@/db/schema";
-import type { InProgressReview } from "./review-cache";
+import type { PullRequestState } from "./review-state";
 
 export interface StoredPullRequestState {
-  state: InProgressReview;
+  state: PullRequestState;
   revision: number;
 }
 
@@ -26,18 +26,12 @@ export async function loadPullRequestState(
     eq(pullRequestStates.headSha, headSha),
   )).limit(1);
 
-  await db.delete(pullRequestStates).where(and(
-    eq(pullRequestStates.viewer, viewer),
-    eq(pullRequestStates.repository, repository),
-    eq(pullRequestStates.pullNumber, pullNumber),
-    ne(pullRequestStates.headSha, headSha),
-  ));
   if (!row) return null;
 
   try {
-    return { state: JSON.parse(row.state) as InProgressReview, revision: row.revision };
+    return { state: JSON.parse(row.state) as PullRequestState, revision: row.revision };
   } catch {
-    await deletePullRequestState(viewer, repository, pullNumber);
+    await deletePullRequestState(viewer, repository, pullNumber, headSha);
     return null;
   }
 }
@@ -46,7 +40,7 @@ export async function savePullRequestState(
   viewer: string,
   repository: string,
   pullNumber: number,
-  state: InProgressReview,
+  state: PullRequestState,
   revision: number,
 ): Promise<void> {
   await getDb().insert(pullRequestStates).values({
@@ -73,10 +67,12 @@ export async function deletePullRequestState(
   viewer: string,
   repository: string,
   pullNumber: number,
+  headSha: string,
 ): Promise<void> {
   await getDb().delete(pullRequestStates).where(and(
     eq(pullRequestStates.viewer, viewer),
     eq(pullRequestStates.repository, repository),
     eq(pullRequestStates.pullNumber, pullNumber),
+    eq(pullRequestStates.headSha, headSha),
   ));
 }

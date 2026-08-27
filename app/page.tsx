@@ -42,9 +42,9 @@ import {
   loadInProgressReview,
   reviewCacheKey,
   saveInProgressReview,
-  type InProgressReview,
   type ReviewEvent,
 } from "@/lib/review-cache";
+import { migrateInProgressReview, type PullRequestState } from "@/lib/review-state";
 import type {
   DiffFile,
   DiffLine,
@@ -849,9 +849,9 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
         const { pull } = await api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}`);
         if (!active) return;
         setPull(pull);
-        let cached: InProgressReview | null = null;
+        let cached: PullRequestState | null = null;
         try {
-          const remote = await api<{ state: InProgressReview | null; revision: number }>(
+          const remote = await api<{ state: PullRequestState | null; revision: number }>(
             `/api/state?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}&headSha=${encodeURIComponent(pull.headSha)}`,
           );
           cached = remote.state;
@@ -860,15 +860,18 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
           // A local draft remains usable when the persistent store is temporarily unavailable.
         }
         if (!cached) {
-          try { cached = loadInProgressReview(window.localStorage, cacheKey, pull.headSha); }
+          try {
+            const legacy = loadInProgressReview(window.localStorage, cacheKey, pull.headSha);
+            cached = legacy ? migrateInProgressReview(legacy) : null;
+          }
           catch { /* Browser privacy settings must not block review work. */ }
         }
         if (cached) {
           setReplay(cached.replay);
           setStep(Math.min(cached.step, Math.max(0, cached.replay.chunks.length - 1)));
-          setComments(cached.comments);
-          setReviewSummary(cached.summary);
-          setReviewEvent(cached.event);
+          setComments(cached.review?.comments ?? []);
+          setReviewSummary(cached.review?.summary ?? "");
+          setReviewEvent(cached.review?.event ?? "COMMENT");
           setModel(cached.model);
           setShowFullDiff(cached.showFullDiff);
           setAiReview(cached.aiReview ?? null);
@@ -889,19 +892,19 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
     // A rebuild briefly removes the replay from memory; retain the last complete
     // state until its replacement is ready.
     if (!stateReady || !pull || !replay) return;
-    const state: InProgressReview = {
-        headSha: pull.headSha,
-        replay,
-        step,
-        comments,
-        summary: reviewSummary,
-        event: reviewEvent,
-        model,
-        showFullDiff,
-        aiReview: aiReview ?? undefined,
-        scoutModel,
-        reviewerModel,
+    const state: PullRequestState = {
+      headSha: pull.headSha,
+      replay,
+      step,
+      model,
+      showFullDiff,
+      aiReview: aiReview ?? undefined,
+      scoutModel,
+      reviewerModel,
     };
+    if (comments.length || reviewSummary.trim()) {
+      state.review = { comments, summary: reviewSummary, event: reviewEvent };
+    }
     const timer = window.setTimeout(async () => {
       const revision = Math.max(stateRevisionRef.current + 1, Date.now());
       stateRevisionRef.current = revision;
@@ -913,7 +916,14 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
         });
         try { clearInProgressReview(window.localStorage, cacheKey); } catch { /* Storage may be unavailable. */ }
       } catch {
-        try { saveInProgressReview(window.localStorage, cacheKey, state); } catch { /* Keep the in-memory state usable. */ }
+        try {
+          saveInProgressReview(window.localStorage, cacheKey, {
+            ...state,
+            comments: state.review?.comments ?? [],
+            summary: state.review?.summary ?? "",
+            event: state.review?.event ?? "COMMENT",
+          });
+        } catch { /* Keep the in-memory state usable. */ }
       }
     }, 400);
     return () => window.clearTimeout(timer);

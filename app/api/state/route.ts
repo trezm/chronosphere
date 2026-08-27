@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { deletePullRequestState, loadPullRequestState, savePullRequestState } from "@/lib/review-state-store";
-import { isInProgressReview } from "@/lib/review-cache";
+import { isPullRequestState } from "@/lib/review-state";
 import { jsonError, parsePullNumber, parseRepo } from "@/lib/github";
 import { readSession } from "@/lib/session";
 
@@ -37,8 +37,8 @@ export async function GET(request: NextRequest) {
     const { repository, pullNumber, headSha } = stateKey(request.nextUrl);
     if (!validHeadSha(headSha)) throw new Error("A valid pull request head SHA is required.");
     const stored = await loadPullRequestState(viewer, repository, pullNumber, headSha);
-    if (!stored || !isInProgressReview(stored.state) || stored.state.headSha !== headSha) {
-      if (stored) await deletePullRequestState(viewer, repository, pullNumber);
+    if (!stored || !isPullRequestState(stored.state) || stored.state.headSha !== headSha) {
+      if (stored) await deletePullRequestState(viewer, repository, pullNumber, headSha);
       return Response.json({ state: null, revision: 0 });
     }
     return Response.json(stored);
@@ -61,7 +61,7 @@ export async function PUT(request: NextRequest) {
     if (!Number.isSafeInteger(input.revision) || (input.revision ?? 0) <= 0) {
       throw new Error("A valid state revision is required.");
     }
-    if (!isInProgressReview(input.state)) throw new Error("The PR state is malformed.");
+    if (!isPullRequestState(input.state)) throw new Error("The PR state is malformed.");
     if (!validHeadSha(input.state.headSha)) throw new Error("A valid pull request head SHA is required.");
     if (new TextEncoder().encode(JSON.stringify(input.state)).byteLength > MAX_STATE_BYTES) {
       throw new Error("The PR state is too large to save.");
