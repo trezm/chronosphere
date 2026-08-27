@@ -14,7 +14,7 @@ export async function loadPullRequestState(
   pullNumber: number,
   headSha: string,
 ): Promise<StoredPullRequestState | null> {
-  const db = getDb();
+  const db = await getDb();
   const [row] = await db.select({
     headSha: pullRequestStates.headSha,
     revision: pullRequestStates.revision,
@@ -43,7 +43,8 @@ export async function savePullRequestState(
   state: PullRequestState,
   revision: number,
 ): Promise<void> {
-  await getDb().insert(pullRequestStates).values({
+  const db = await getDb();
+  await db.insert(pullRequestStates).values({
     viewer,
     repository,
     pullNumber,
@@ -69,7 +70,8 @@ export async function deletePullRequestState(
   pullNumber: number,
   headSha: string,
 ): Promise<void> {
-  await getDb().delete(pullRequestStates).where(and(
+  const db = await getDb();
+  await db.delete(pullRequestStates).where(and(
     eq(pullRequestStates.viewer, viewer),
     eq(pullRequestStates.repository, repository),
     eq(pullRequestStates.pullNumber, pullNumber),
