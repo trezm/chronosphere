@@ -6,6 +6,7 @@ interface GitHubPull {
   number: number;
   title: string;
   draft: boolean;
+  created_at: string;
   updated_at: string;
   user: { login: string; avatar_url: string };
   assignees: Array<{ login: string; avatar_url: string }>;
@@ -26,6 +27,7 @@ export async function GET(request: NextRequest) {
       assignees: pull.assignees.map((person) => ({ login: person.login, avatarUrl: person.avatar_url })),
       requestedReviewers: pull.requested_reviewers.map((person) => ({ login: person.login, avatarUrl: person.avatar_url })),
       draft: pull.draft,
+      createdAt: pull.created_at,
       updatedAt: pull.updated_at,
       head: pull.head.ref,
       base: pull.base.ref,
