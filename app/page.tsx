@@ -35,6 +35,8 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import Image from "next/image";
 import { api, isApiErrorWithStatus } from "@/lib/api";
 import { parseUnifiedDiff, replayStepMap } from "@/lib/diff";
+import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
+import { readReplayEvents } from "@/lib/replay-stream";
 import { findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, sortFindings } from "@/lib/review-findings";
 import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
 import {
@@ -101,6 +103,20 @@ function timeAgo(value: string): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return days < 30 ? `${days}d ago` : new Date(value).toLocaleDateString();
+}
+
+/** Reading localStorage throws outright when the browser blocks site data. */
+function browserStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** True when two timestamps are close enough that showing both adds nothing. */
+function sameMoment(a: string, b: string): boolean {
+  return Math.abs(new Date(a).getTime() - new Date(b).getTime()) < 60000;
 }
 
 function Avatar({ src, alt, size = 24 }: { src: string; alt: string; size?: number }) {
@@ -237,6 +253,7 @@ function RepositoryPicker({
   onReconnectRequired: () => void;
 }) {
   const [repositories, setRepositories] = useState<Repository[]>([]);
+  const [recentRepos, setRecentRepos] = useState<Set<string>>(() => new Set());
   const [pulls, setPulls] = useState<{ repo: string; items: PullRequestSummary[] }>({ repo: "", items: [] });
   const [repoSearch, setRepoSearch] = useState("");
   const [prSearch, setPrSearch] = useState("");
@@ -247,7 +264,12 @@ function RepositoryPicker({
 
   useEffect(() => {
     api<{ repositories: Repository[] }>("/api/github/repos")
-      .then(({ repositories }) => setRepositories(repositories))
+      .then(({ repositories }) => {
+        // Snapshot recency once so clicking a repository never reshuffles the list mid-session.
+        const recency = loadRepoRecency(browserStorage());
+        setRepositories(orderByRecency(repositories, recency));
+        setRecentRepos(new Set(Object.keys(recency)));
+      })
       .catch((error: unknown) => {
         if (isApiErrorWithStatus(error, 400, 401)) {
           onReconnectRequired();
@@ -278,6 +300,7 @@ function RepositoryPicker({
     const query = repoSearch.toLowerCase();
     return repo.fullName.toLowerCase().includes(query) || repo.description?.toLowerCase().includes(query);
   });
+  const recentEdge = filteredRepos.findLastIndex((repo) => recentRepos.has(repo.fullName));
   const filteredPulls = pulls.items.filter((pull) => {
     const matchesSearch = `${pull.number} ${pull.title} ${pull.author.login}`.toLowerCase().includes(prSearch.toLowerCase());
     if (!matchesSearch) return false;
@@ -308,8 +331,8 @@ function RepositoryPicker({
           </div>
           <div className="repo-list">
             {loadingRepos && <div className="empty-state"><span className="spinner" />Loading repositories…</div>}
-            {!loadingRepos && filteredRepos.map((repo) => (
-              <button key={repo.id} className={`repo-row ${selectedRepo === repo.fullName ? "selected" : ""}`} onClick={() => onSelectRepo(repo.fullName, "push")}>
+            {!loadingRepos && filteredRepos.map((repo, index) => (
+              <button key={repo.id} className={`repo-row ${selectedRepo === repo.fullName ? "selected" : ""} ${index === recentEdge && index < filteredRepos.length - 1 ? "recent-edge" : ""}`} onClick={() => { recordRepoOpened(browserStorage(), repo.fullName); onSelectRepo(repo.fullName, "push"); }}>
                 <Avatar src={repo.ownerAvatarUrl} alt="" size={28} />
                 <span className="repo-copy"><strong>{repo.name}</strong><span>{repo.owner} · {repo.private ? "Private" : "Public"}</span></span>
                 {repo.private && <Lock size={12} />}
@@ -337,8 +360,12 @@ function RepositoryPicker({
                   <div className="pr-title-row"><strong>{pull.title}</strong>{pull.draft && <span className="draft-badge">Draft</span>}</div>
                   <div className="pr-meta">
                     <span>opened by</span><People people={[pull.author]} />
-                    <span className="dot">·</span><span>{timeAgo(pull.updatedAt)}</span>
+                    <span className="dot">·</span><span>opened {timeAgo(pull.createdAt)}</span>
+                    {!sameMoment(pull.createdAt, pull.updatedAt) && <><span className="dot">·</span><span>updated {timeAgo(pull.updatedAt)}</span></>}
                     <span className="branch"><GitBranch size={12} />{pull.head} → {pull.base}</span>
+                    {(pull.additions > 0 || pull.deletions > 0 || pull.changedFiles > 0) && (
+                      <span className="pr-size"><span className="additions">+{pull.additions}</span><span className="deletions">−{pull.deletions}</span><span>{pull.changedFiles} files</span></span>
+                    )}
                   </div>
                   <div className="assignment-row">
                     <span><UserRoundCheck size={13} /> Assigned</span><People people={pull.assignees} />
@@ -841,6 +868,15 @@ function ReviewSidebar({
   );
 }
 
+type BuildStage = "contacting" | "reconstructing" | "ordering";
+
+function buildStageLabel(stage: BuildStage, chars: number, model: string): string {
+  if (stage === "contacting") return `Contacting ${model}…`;
+  if (stage === "ordering") return "Ordering the steps…";
+  const size = chars < 1000 ? `${chars}` : `${(chars / 1000).toFixed(1)}k`;
+  return `Reconstructing — ${size} characters so far…`;
+}
+
 function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, onStepChange, onBack }: { repo: string; number: number; initialStep: number | null; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; onStepChange: (step: number) => void; onBack: () => void }) {
   const [pull, setPull] = useState<PullRequestDetail | null>(null);
   const [replay, setReplay] = useState<ReplayResult | null>(null);
@@ -851,6 +887,9 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const [reviewSummary, setReviewSummary] = useState("");
   const [loading, setLoading] = useState(true);
   const [building, setBuilding] = useState(false);
+  const [buildStage, setBuildStage] = useState<BuildStage>("contacting");
+  const [buildChars, setBuildChars] = useState(0);
+  const [buildElapsed, setBuildElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState(defaultModel);
   const [scoutModel, setScoutModel] = useState(defaultScoutModel);
@@ -861,7 +900,9 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const [showFullDiff, setShowFullDiff] = useState(false);
   const [stateReady, setStateReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const timelineRef = useRef<HTMLOListElement>(null);
   const stateRevisionRef = useRef(0);
+  const buildAbortRef = useRef<AbortController | null>(null);
   // The deep-linked step is read once: later step changes only rewrite the URL.
   const bootStepRef = useRef(initialStep);
   const cacheKey = useMemo(() => reviewCacheKey(viewer, repo, number), [viewer, repo, number]);
@@ -966,6 +1007,10 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     const timer = window.setTimeout(() => setStep((value) => Math.min(replay.chunks.length - 1, value + 1)), 2400);
     return () => window.clearTimeout(timer);
   }, [playing, step, replay]);
+  useEffect(() => {
+    if (!replay) return;
+    timelineRef.current?.children.item(step)?.scrollIntoView({ block: "nearest" });
+  }, [replay, step]);
   // Steps replace the current history entry, so Back leaves the replay instead
   // of walking every step of it. Waiting for the restore keeps a deep-linked
   // step in the URL until it has been applied.
@@ -973,17 +1018,50 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     if (stateReady) onStepChange(replay ? step + 1 : 0);
   }, [onStepChange, replay, stateReady, step]);
 
+  useEffect(() => {
+    if (!building) return;
+    const started = Date.now();
+    const timer = window.setInterval(() => setBuildElapsed(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [building]);
+  useEffect(() => () => buildAbortRef.current?.abort(), []);
+
+  // The replay arrives as a stream of progress events, which the shared api()
+  // helper cannot consume, so this request is made inline.
   const build = async () => {
-    setBuilding(true); setError(null);
+    if (building) return;
+    const controller = new AbortController();
+    buildAbortRef.current = controller;
+    setBuilding(true); setBuildStage("contacting"); setBuildChars(0); setBuildElapsed(0); setError(null);
     try {
-      const result = await api<{ replay: ReplayResult }>("/api/replay", {
+      const response = await fetch("/api/replay", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo, number, model }),
+        signal: controller.signal,
       });
-      setReplay(result.replay); setStep(0);
-    } catch (error) { setError(error instanceof Error ? error.message : "Could not build replay."); }
-    finally { setBuilding(false); }
+      if (!response.ok || !response.body) {
+        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || `${response.status} ${response.statusText}`);
+      }
+      let built: ReplayResult | null = null;
+      for await (const event of readReplayEvents(response.body)) {
+        if (event.type === "progress") { setBuildStage("reconstructing"); setBuildChars(event.chars); }
+        else if (event.type === "parsing") setBuildStage("ordering");
+        else if (event.type === "error") throw new Error(event.error);
+        else built = event.replay;
+      }
+      if (!built) throw new Error("The replay stream ended before it finished.");
+      setReplay(built); setStep(0);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setError(error instanceof Error ? error.message : "Could not build replay.");
+    }
+    finally {
+      if (buildAbortRef.current === controller) buildAbortRef.current = null;
+      setBuilding(false);
+    }
   };
+  const cancelBuild = () => buildAbortRef.current?.abort();
 
   const files = useMemo(() => parseUnifiedDiff(pull?.diff ?? ""), [pull?.diff]);
   const chunk = replay?.chunks[step] ?? null;
@@ -1082,7 +1160,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
       </header>
       {!replay ? (
         <section className="build-replay">
-          <div className="replay-illustration" aria-hidden="true">
+          <div className={`replay-illustration${building ? " building" : ""}`} aria-hidden="true">
             <div className="orbit-line" /><span className="node n1">1</span><span className="node n2">2</span><span className="node n3">3</span><span className="node n4"><Play size={17} fill="currentColor" /></span>
           </div>
           <div className="eyebrow"><RotateCcw size={13} /> Ready to reconstruct</div>
@@ -1090,14 +1168,25 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           <p>A model will divide {pull.additions + pull.deletions} changed lines into a plausible implementation order. This is a reconstruction for comprehension—not the author&apos;s actual history.</p>
           <label className="model-field"><span>OpenRouter model</span><input value={model} onChange={(event) => setModel(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void build(); } }} spellCheck={false} /></label>
           {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
-          <button className="primary-button build-button" onClick={build} disabled={building || !model.trim()}>{building ? <><span className="spinner" />Constructing the replay…</> : <><Play size={15} fill="currentColor" />Build replay</>}</button>
+          {building ? (
+            <div className="build-progress">
+              <div className="build-status" role="status" aria-live="polite">
+                <span className="spinner" />
+                <span className="build-stage">{buildStageLabel(buildStage, buildChars, model)}</span>
+                <em className="build-elapsed">{buildElapsed}s</em>
+              </div>
+              <button type="button" className="text-button cancel-build" onClick={cancelBuild}>Cancel</button>
+            </div>
+          ) : (
+            <button className="primary-button build-button" onClick={build} disabled={!model.trim()}><Play size={15} fill="currentColor" />Build replay</button>
+          )}
           <div className="pr-context"><Avatar src={pull.author.avatarUrl} alt="" size={22} /><span>Authored by <strong>@{pull.author.login}</strong></span><GitBranch size={13} /><code>{pull.head}</code><ArrowRight size={12} /><code>{pull.base}</code></div>
         </section>
       ) : (
         <div className="replay-grid">
           <aside className="timeline-panel">
             <div className="timeline-title"><span>Reconstruction</span><em>{replay.chunks.length} steps</em></div>
-            <ol>
+            <ol ref={timelineRef}>
               {replay.chunks.map((item, index) => (
                 <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={`${item.file}-${item.start}`}>
                   <button onClick={() => go(index)}>

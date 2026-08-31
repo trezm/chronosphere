@@ -22,6 +22,7 @@ export interface PullRequestSummary {
   assignees: { login: string; avatarUrl: string }[];
   requestedReviewers: { login: string; avatarUrl: string }[];
   draft: boolean;
+  createdAt: string;
   updatedAt: string;
   head: string;
   base: string;

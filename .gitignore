@@ -35,6 +35,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# local sqlite state (Node fallback for the D1-backed store)
+/.data/
+
 # typescript
 next-env.d.ts
 *.tsbuildinfo
