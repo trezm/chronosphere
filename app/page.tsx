@@ -35,6 +35,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import Image from "next/image";
 import { api, isApiErrorWithStatus } from "@/lib/api";
 import { parseUnifiedDiff, replayStepMap } from "@/lib/diff";
+import { readReplayEvents } from "@/lib/replay-stream";
 import { findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, sortFindings } from "@/lib/review-findings";
 import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
 import {
@@ -815,6 +816,15 @@ function ReviewSidebar({
   );
 }
 
+type BuildStage = "contacting" | "reconstructing" | "ordering";
+
+function buildStageLabel(stage: BuildStage, chars: number, model: string): string {
+  if (stage === "contacting") return `Contacting ${model}…`;
+  if (stage === "ordering") return "Ordering the steps…";
+  const size = chars < 1000 ? `${chars}` : `${(chars / 1000).toFixed(1)}k`;
+  return `Reconstructing — ${size} characters so far…`;
+}
+
 function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, onBack }: { repo: Repository; summary: PullRequestSummary; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; onBack: () => void }) {
   const [pull, setPull] = useState<PullRequestDetail | null>(null);
   const [replay, setReplay] = useState<ReplayResult | null>(null);
@@ -825,6 +835,9 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
   const [reviewSummary, setReviewSummary] = useState("");
   const [loading, setLoading] = useState(true);
   const [building, setBuilding] = useState(false);
+  const [buildStage, setBuildStage] = useState<BuildStage>("contacting");
+  const [buildChars, setBuildChars] = useState(0);
+  const [buildElapsed, setBuildElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState(defaultModel);
   const [scoutModel, setScoutModel] = useState(defaultScoutModel);
@@ -836,6 +849,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
   const [stateReady, setStateReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stateRevisionRef = useRef(0);
+  const buildAbortRef = useRef<AbortController | null>(null);
   const cacheKey = useMemo(() => reviewCacheKey(viewer, repo.fullName, summary.number), [viewer, repo.fullName, summary.number]);
 
   const refreshPull = async () => {
@@ -938,17 +952,50 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
     return () => window.clearTimeout(timer);
   }, [playing, step, replay]);
 
+  useEffect(() => {
+    if (!building) return;
+    const started = Date.now();
+    const timer = window.setInterval(() => setBuildElapsed(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [building]);
+  useEffect(() => () => buildAbortRef.current?.abort(), []);
+
+  // The replay arrives as a stream of progress events, which the shared api()
+  // helper cannot consume, so this request is made inline.
   const build = async () => {
-    setBuilding(true); setError(null);
+    if (building) return;
+    const controller = new AbortController();
+    buildAbortRef.current = controller;
+    setBuilding(true); setBuildStage("contacting"); setBuildChars(0); setBuildElapsed(0); setError(null);
     try {
-      const result = await api<{ replay: ReplayResult }>("/api/replay", {
+      const response = await fetch("/api/replay", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo: repo.fullName, number: summary.number, model }),
+        signal: controller.signal,
       });
-      setReplay(result.replay); setStep(0);
-    } catch (error) { setError(error instanceof Error ? error.message : "Could not build replay."); }
-    finally { setBuilding(false); }
+      if (!response.ok || !response.body) {
+        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || `${response.status} ${response.statusText}`);
+      }
+      let built: ReplayResult | null = null;
+      for await (const event of readReplayEvents(response.body)) {
+        if (event.type === "progress") { setBuildStage("reconstructing"); setBuildChars(event.chars); }
+        else if (event.type === "parsing") setBuildStage("ordering");
+        else if (event.type === "error") throw new Error(event.error);
+        else built = event.replay;
+      }
+      if (!built) throw new Error("The replay stream ended before it finished.");
+      setReplay(built); setStep(0);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setError(error instanceof Error ? error.message : "Could not build replay.");
+    }
+    finally {
+      if (buildAbortRef.current === controller) buildAbortRef.current = null;
+      setBuilding(false);
+    }
   };
+  const cancelBuild = () => buildAbortRef.current?.abort();
 
   const files = useMemo(() => parseUnifiedDiff(pull?.diff ?? ""), [pull?.diff]);
   const chunk = replay?.chunks[step] ?? null;
@@ -1047,7 +1094,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
       </header>
       {!replay ? (
         <section className="build-replay">
-          <div className="replay-illustration" aria-hidden="true">
+          <div className={`replay-illustration${building ? " building" : ""}`} aria-hidden="true">
             <div className="orbit-line" /><span className="node n1">1</span><span className="node n2">2</span><span className="node n3">3</span><span className="node n4"><Play size={17} fill="currentColor" /></span>
           </div>
           <div className="eyebrow"><RotateCcw size={13} /> Ready to reconstruct</div>
@@ -1055,7 +1102,18 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
           <p>A model will divide {pull.additions + pull.deletions} changed lines into a plausible implementation order. This is a reconstruction for comprehension—not the author&apos;s actual history.</p>
           <label className="model-field"><span>OpenRouter model</span><input value={model} onChange={(event) => setModel(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void build(); } }} spellCheck={false} /></label>
           {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
-          <button className="primary-button build-button" onClick={build} disabled={building || !model.trim()}>{building ? <><span className="spinner" />Constructing the replay…</> : <><Play size={15} fill="currentColor" />Build replay</>}</button>
+          {building ? (
+            <div className="build-progress">
+              <div className="build-status" role="status" aria-live="polite">
+                <span className="spinner" />
+                <span className="build-stage">{buildStageLabel(buildStage, buildChars, model)}</span>
+                <em className="build-elapsed">{buildElapsed}s</em>
+              </div>
+              <button type="button" className="text-button cancel-build" onClick={cancelBuild}>Cancel</button>
+            </div>
+          ) : (
+            <button className="primary-button build-button" onClick={build} disabled={!model.trim()}><Play size={15} fill="currentColor" />Build replay</button>
+          )}
           <div className="pr-context"><Avatar src={pull.author.avatarUrl} alt="" size={22} /><span>Authored by <strong>@{pull.author.login}</strong></span><GitBranch size={13} /><code>{pull.head}</code><ArrowRight size={12} /><code>{pull.base}</code></div>
         </section>
       ) : (

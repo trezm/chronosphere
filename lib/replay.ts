@@ -1,5 +1,6 @@
 import { changedLines, normalizeReplayChunks, parseUnifiedDiff } from "./diff";
 import { defaultOpenRouterModel } from "./config";
+import { readOpenRouterContent } from "./replay-stream";
 import type { PullRequestDetail, ReplayResult } from "./types";
 
 const MAX_LISTING_CHARS = 280_000;
@@ -53,19 +54,31 @@ function parseModelJson(content: string): { chunks?: unknown[] } {
   return JSON.parse(candidate) as { chunks?: unknown[] };
 }
 
+export interface BuildReplayOptions {
+  /** OpenRouter model slug; falls back to the configured default. */
+  model?: string;
+  /** Aborts the model call when the caller goes away. */
+  signal?: AbortSignal;
+  /** Called with the accumulated model output length as content streams in. */
+  onProgress?: (chars: number) => void;
+  /** Called once the model output is complete and the steps are being ordered. */
+  onParse?: () => void;
+}
+
 export async function buildReplay(
   detail: Pick<PullRequestDetail, "number" | "title" | "body" | "author" | "base" | "head" | "diff">,
   apiKey: string,
-  requestedModel?: string
+  options: BuildReplayOptions = {}
 ): Promise<ReplayResult> {
   const files = parseUnifiedDiff(detail.diff);
   const total = changedLines(files).length;
   if (total === 0) throw new Error("This pull request has no textual changes to replay.");
   const numbered = listing(detail.diff);
-  const model = requestedModel?.trim() || defaultOpenRouterModel();
+  const model = options.model?.trim() || defaultOpenRouterModel();
   const prompt = `PR #${detail.number}: ${detail.title}\nBase: ${detail.base}  Head: ${detail.head}  Author: @${detail.author.login}\n\nDescription:\n${detail.body || "(no description)"}\n\nChanged lines, numbered:\n${numbered.text}`;
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
+    signal: options.signal,
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
@@ -75,6 +88,7 @@ export async function buildReplay(
     body: JSON.stringify({
       model,
       temperature: 0.2,
+      stream: true,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
@@ -82,13 +96,19 @@ export async function buildReplay(
       ],
     }),
   });
-  const body = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-    error?: { message?: string };
-  };
-  if (!response.ok) throw new Error(body.error?.message || `OpenRouter returned ${response.status}.`);
-  const content = body.choices?.[0]?.message?.content;
+  if (!response.ok) {
+    // OpenRouter reports bad models and bad keys as a JSON body, streaming or not.
+    const body = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new Error(body?.error?.message || `OpenRouter returned ${response.status}.`);
+  }
+  if (!response.body) throw new Error("OpenRouter returned an empty replay.");
+  let content = "";
+  for await (const delta of readOpenRouterContent(response.body)) {
+    content += delta;
+    options.onProgress?.(content.length);
+  }
   if (!content) throw new Error("OpenRouter returned an empty replay.");
+  options.onParse?.();
   const parsed = parseModelJson(content);
   const chunks = normalizeReplayChunks((parsed.chunks ?? []) as never[], files);
   if (!chunks.length) throw new Error("The model did not return any usable replay steps.");
