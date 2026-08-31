@@ -1,15 +1,20 @@
 import { NextRequest } from "next/server";
 import { githubFetch, githubJson, githubToken, jsonError, parsePullNumber, parseRepo } from "@/lib/github";
 import { buildReplay } from "@/lib/replay";
+import type { ReplayStreamEvent } from "@/lib/replay-stream";
 import { readSession } from "@/lib/session";
 import type { PullRequestDetail } from "@/lib/types";
 
 export const maxDuration = 120;
 
+/** Roughly three progress events per second: alive to watch, cheap to send. */
+const PROGRESS_INTERVAL_MS = 300;
+
 export async function POST(request: NextRequest) {
   try {
     const session = await readSession(request);
-    if (!session.openrouter?.apiKey) throw new Error("OpenRouter authentication is required.");
+    const apiKey = session.openrouter?.apiKey;
+    if (!apiKey) throw new Error("OpenRouter authentication is required.");
     const token = await githubToken(request);
     const input = (await request.json()) as { repo?: string; number?: number; model?: string };
     const { fullName } = parseRepo(input.repo ?? null);
@@ -31,7 +36,53 @@ export async function POST(request: NextRequest) {
       head: pull.head.ref,
       diff: await diffResponse.text(),
     } as Pick<PullRequestDetail, "number" | "title" | "body" | "author" | "base" | "head" | "diff">;
-    return Response.json({ replay: await buildReplay(detail, session.openrouter.apiKey, input.model) });
+    // Request validation and the GitHub round trip stay plain JSON errors; once
+    // the model call begins the client is reading a stream, so build failures
+    // travel as a terminal error event instead.
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let open = true;
+        const send = (event: ReplayStreamEvent) => {
+          if (!open) return;
+          try {
+            controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+          } catch {
+            open = false; // The client hung up mid-build.
+          }
+        };
+        let lastProgress = 0;
+        try {
+          const replay = await buildReplay(detail, apiKey, {
+            model: input.model,
+            signal: request.signal,
+            onProgress: (chars) => {
+              const now = Date.now();
+              if (now - lastProgress < PROGRESS_INTERVAL_MS) return;
+              lastProgress = now;
+              send({ type: "progress", chars });
+            },
+            onParse: () => send({ type: "parsing" }),
+          });
+          send({ type: "done", replay });
+        } catch (error) {
+          send({ type: "error", error: error instanceof Error ? error.message : "Could not build the replay." });
+        } finally {
+          try {
+            if (open) controller.close();
+          } catch {
+            // Already closed by the client disconnecting.
+          }
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+      },
+    });
   } catch (error) {
     return jsonError(error);
   }
