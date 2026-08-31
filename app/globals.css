@@ -145,7 +145,7 @@ code, .line-number { font-family: var(--font-mono), monospace; }
 /* Shared micro-label: uppercase mono used for kickers, badges, and statuses */
 .kicker, .timeline-title, .step-meta > span:first-child, .findings-heading, .finding-labels, .draft-card > span, .draft-badge, .connection-index { font-family: var(--font-mono), monospace; text-transform: uppercase; letter-spacing: 0.08em; }
 
-.app-frame { min-height: 100vh; display: flex; flex-direction: column; }
+.app-frame { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
 
 /* ============================================================================
    App header
@@ -200,7 +200,7 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
    Connection gate
    ========================================================================== */
 
-.auth-shell { flex: 1; display: grid; place-items: center; position: relative; overflow: hidden; padding: 56px 24px; }
+.auth-shell { flex: 1; display: grid; place-items: center; position: relative; overflow: hidden; overflow-y: auto; padding: 56px 24px; }
 .auth-orbit { width: 730px; height: 730px; border: 1px solid var(--border); border-radius: 50%; position: absolute; pointer-events: none; }
 .auth-orbit::before, .auth-orbit::after { content: ""; position: absolute; border: 1px solid var(--border); border-radius: 50%; inset: 85px; }
 .auth-orbit::after { inset: 205px; border-color: var(--border-strong); }
@@ -228,7 +228,7 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
    Repository & pull request picker
    ========================================================================== */
 
-.picker-shell { width: min(1390px, 100%); margin: 0 auto; padding: 36px 24px 28px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.picker-shell { width: min(1390px, 100%); margin: 0 auto; padding: 36px 24px 28px; flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .picker-intro { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 24px; }
 .picker-intro h1 { margin: 8px 0 4px; font-size: 28px; letter-spacing: -0.03em; font-weight: 640; }
 .picker-intro p { margin: 0; color: var(--muted); font-size: 13px; }
@@ -294,7 +294,7 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
    Replay: build screen
    ========================================================================== */
 
-.build-replay { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 48px 20px 72px; }
+.build-replay { flex: 1; overflow-y: auto; display: flex; flex-direction: column; align-items: center; justify-content: safe center; text-align: center; padding: 48px 20px 72px; }
 .build-replay h2 { margin: 14px 0 10px; font-size: 34px; letter-spacing: -0.035em; font-weight: 640; }
 .build-replay > p { max-width: 570px; margin: 0; color: var(--muted); line-height: 1.65; font-size: 13px; }
 .replay-illustration { width: 410px; max-width: 80vw; height: 100px; position: relative; margin-bottom: 24px; }
@@ -568,7 +568,7 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
   .pr-stats span { display: none; }
   .replay-grid { display: flex; flex-direction: column; overflow: auto; }
   .timeline-panel { display: none; }
-  .code-stage { min-height: 68vh; flex: none; }
-  .review-sidebar { display: block; position: static; width: auto; max-height: none; box-shadow: none; border-left: 0; border-top: 1px solid var(--border); }
+  .code-stage { height: 68vh; height: 68dvh; flex: none; }
+  .review-sidebar { display: block; position: static; width: auto; max-height: none; flex: none; box-shadow: none; border-left: 0; border-top: 1px solid var(--border); }
   .inline-composer, .inline-draft, .inline-finding { padding-left: 12px; }
 }

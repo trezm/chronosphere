@@ -835,6 +835,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
   const [showFullDiff, setShowFullDiff] = useState(false);
   const [stateReady, setStateReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const timelineRef = useRef<HTMLOListElement>(null);
   const stateRevisionRef = useRef(0);
   const cacheKey = useMemo(() => reviewCacheKey(viewer, repo.fullName, summary.number), [viewer, repo.fullName, summary.number]);
 
@@ -937,6 +938,10 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
     const timer = window.setTimeout(() => setStep((value) => Math.min(replay.chunks.length - 1, value + 1)), 2400);
     return () => window.clearTimeout(timer);
   }, [playing, step, replay]);
+  useEffect(() => {
+    if (!replay) return;
+    timelineRef.current?.children.item(step)?.scrollIntoView({ block: "nearest" });
+  }, [replay, step]);
 
   const build = async () => {
     setBuilding(true); setError(null);
@@ -1062,7 +1067,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
         <div className="replay-grid">
           <aside className="timeline-panel">
             <div className="timeline-title"><span>Reconstruction</span><em>{replay.chunks.length} steps</em></div>
-            <ol>
+            <ol ref={timelineRef}>
               {replay.chunks.map((item, index) => (
                 <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={`${item.file}-${item.start}`}>
                   <button onClick={() => go(index)}>
