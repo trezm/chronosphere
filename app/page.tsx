@@ -65,6 +65,33 @@ type AuthState = {
   defaults: { model: string; scoutModel: string; reviewerModel: string };
 };
 
+type Route = { repo: string | null; pull: number | null; step: number | null };
+
+const EMPTY_ROUTE: Route = { repo: null, pull: null, step: null };
+
+function positiveInteger(value: string | null): number | null {
+  const parsed = Number(value);
+  return value !== null && value !== "" && Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function readRoute(): Route {
+  if (typeof window === "undefined") return EMPTY_ROUTE;
+  const params = new URLSearchParams(window.location.search);
+  const candidate = params.get("repo");
+  const repo = candidate && /^[^/\s]+\/[^/\s]+$/.test(candidate) ? candidate : null;
+  const pull = repo ? positiveInteger(params.get("pr")) : null;
+  return { repo, pull, step: pull ? positiveInteger(params.get("step")) : null };
+}
+
+function routeUrl(route: Route): string {
+  const params = new URLSearchParams();
+  if (route.repo) params.set("repo", route.repo);
+  if (route.repo && route.pull) params.set("pr", String(route.pull));
+  if (route.repo && route.pull && route.step) params.set("step", String(route.step));
+  const query = params.toString();
+  return query ? `${window.location.pathname}?${query}` : window.location.pathname;
+}
+
 function timeAgo(value: string): string {
   const seconds = Math.max(1, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
   if (seconds < 60) return "just now";
@@ -198,32 +225,29 @@ function People({ people, empty = "Unassigned" }: { people: Array<{ login: strin
 
 function RepositoryPicker({
   viewer,
+  selectedRepo,
+  onSelectRepo,
   onOpen,
   onReconnectRequired,
 }: {
   viewer: NonNullable<AuthState["github"]["user"]>;
-  onOpen: (repo: Repository, pull: PullRequestSummary) => void;
+  selectedRepo: string | null;
+  onSelectRepo: (repo: string, mode: "push" | "replace") => void;
+  onOpen: (repo: string, pull: number) => void;
   onReconnectRequired: () => void;
 }) {
   const [repositories, setRepositories] = useState<Repository[]>([]);
-  const [selected, setSelected] = useState<Repository | null>(null);
-  const [pulls, setPulls] = useState<PullRequestSummary[]>([]);
+  const [pulls, setPulls] = useState<{ repo: string; items: PullRequestSummary[] }>({ repo: "", items: [] });
   const [repoSearch, setRepoSearch] = useState("");
   const [prSearch, setPrSearch] = useState("");
   const [involvement, setInvolvement] = useState<"all" | "mine" | "assigned" | "review">("all");
   const [loadingRepos, setLoadingRepos] = useState(true);
-  const [loadingPulls, setLoadingPulls] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loadingPulls = !!selectedRepo && pulls.repo !== selectedRepo;
 
   useEffect(() => {
     api<{ repositories: Repository[] }>("/api/github/repos")
-      .then(({ repositories }) => {
-        setRepositories(repositories);
-        if (repositories[0]) {
-          setLoadingPulls(true);
-          setSelected(repositories[0]);
-        }
-      })
+      .then(({ repositories }) => setRepositories(repositories))
       .catch((error: unknown) => {
         if (isApiErrorWithStatus(error, 400, 401)) {
           onReconnectRequired();
@@ -234,25 +258,27 @@ function RepositoryPicker({
       .finally(() => setLoadingRepos(false));
   }, [onReconnectRequired]);
 
+  // The first repository is a default rather than a navigation, so it replaces
+  // the current history entry instead of adding one.
   useEffect(() => {
-    if (!selected) return;
-    api<{ pulls: PullRequestSummary[] }>(`/api/github/pulls?repo=${encodeURIComponent(selected.fullName)}`)
-      .then(({ pulls }) => setPulls(pulls))
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoadingPulls(false));
-  }, [selected]);
+    if (selectedRepo || !repositories[0]) return;
+    onSelectRepo(repositories[0].fullName, "replace");
+  }, [onSelectRepo, repositories, selectedRepo]);
 
-  const selectRepository = (repo: Repository) => {
-    setLoadingPulls(true);
-    setError(null);
-    setSelected(repo);
-  };
+  useEffect(() => {
+    if (!selectedRepo) return;
+    let stale = false;
+    api<{ pulls: PullRequestSummary[] }>(`/api/github/pulls?repo=${encodeURIComponent(selectedRepo)}`)
+      .then(({ pulls }) => { if (!stale) { setError(null); setPulls({ repo: selectedRepo, items: pulls }); } })
+      .catch((e: Error) => { if (!stale) { setError(e.message); setPulls({ repo: selectedRepo, items: [] }); } });
+    return () => { stale = true; };
+  }, [selectedRepo]);
 
   const filteredRepos = repositories.filter((repo) => {
     const query = repoSearch.toLowerCase();
     return repo.fullName.toLowerCase().includes(query) || repo.description?.toLowerCase().includes(query);
   });
-  const filteredPulls = pulls.filter((pull) => {
+  const filteredPulls = pulls.items.filter((pull) => {
     const matchesSearch = `${pull.number} ${pull.title} ${pull.author.login}`.toLowerCase().includes(prSearch.toLowerCase());
     if (!matchesSearch) return false;
     if (involvement === "mine") return pull.author.login.toLowerCase() === viewer.login.toLowerCase();
@@ -283,7 +309,7 @@ function RepositoryPicker({
           <div className="repo-list">
             {loadingRepos && <div className="empty-state"><span className="spinner" />Loading repositories…</div>}
             {!loadingRepos && filteredRepos.map((repo) => (
-              <button key={repo.id} className={`repo-row ${selected?.id === repo.id ? "selected" : ""}`} onClick={() => selectRepository(repo)}>
+              <button key={repo.id} className={`repo-row ${selectedRepo === repo.fullName ? "selected" : ""}`} onClick={() => onSelectRepo(repo.fullName, "push")}>
                 <Avatar src={repo.ownerAvatarUrl} alt="" size={28} />
                 <span className="repo-copy"><strong>{repo.name}</strong><span>{repo.owner} · {repo.private ? "Private" : "Public"}</span></span>
                 {repo.private && <Lock size={12} />}
@@ -294,7 +320,7 @@ function RepositoryPicker({
         </div>
         <div className="pr-panel">
           <div className="panel-heading pr-heading">
-            <div><span className="kicker">Open pull requests</span><strong>{selected?.fullName ?? "Select a repository"}</strong></div>
+            <div><span className="kicker">Open pull requests</span><strong>{selectedRepo ?? "Select a repository"}</strong></div>
             <label className="search-field"><Search size={15} /><input value={prSearch} onChange={(event) => setPrSearch(event.target.value)} placeholder="Filter pull requests" aria-label="Filter pull requests" /></label>
           </div>
           <div className="filter-bar" role="group" aria-label="Pull request involvement">
@@ -304,8 +330,8 @@ function RepositoryPicker({
           </div>
           <div className="pr-list">
             {loadingPulls && <div className="empty-state"><span className="spinner" />Loading pull requests…</div>}
-            {!loadingPulls && selected && filteredPulls.map((pull) => (
-              <button className="pr-row" key={pull.number} onClick={() => onOpen(selected, pull)}>
+            {!loadingPulls && selectedRepo && filteredPulls.map((pull) => (
+              <button className="pr-row" key={pull.number} onClick={() => onOpen(selectedRepo, pull.number)}>
                 <div className="pr-number">#{pull.number}</div>
                 <div className="pr-main">
                   <div className="pr-title-row"><strong>{pull.title}</strong>{pull.draft && <span className="draft-badge">Draft</span>}</div>
@@ -322,7 +348,7 @@ function RepositoryPicker({
                 <ChevronRight size={18} />
               </button>
             ))}
-            {!loadingPulls && selected && filteredPulls.length === 0 && <div className="empty-state">No open pull requests match these filters.</div>}
+            {!loadingPulls && selectedRepo && filteredPulls.length === 0 && <div className="empty-state">No open pull requests match these filters.</div>}
           </div>
         </div>
       </section>
@@ -624,7 +650,7 @@ function ReviewSidebar({
   onSubmitted,
   onMerged,
 }: {
-  repo: Repository;
+  repo: string;
   pull: PullRequestDetail;
   comments: PendingComment[];
   files: DiffFile[];
@@ -682,7 +708,7 @@ function ReviewSidebar({
     try {
       await api("/api/github/review", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: repo.fullName, number: pull.number, event, body: summary, commitId: pull.headSha, comments }),
+        body: JSON.stringify({ repo, number: pull.number, event, body: summary, commitId: pull.headSha, comments }),
       });
       setMessage("Review posted to GitHub."); onSubmitted();
     } catch (error) { setMessage(error instanceof Error ? error.message : "Review failed."); }
@@ -695,7 +721,7 @@ function ReviewSidebar({
     try {
       await api("/api/github/merge", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: repo.fullName, number: pull.number, method: mergeMethod, sha: pull.headSha }),
+        body: JSON.stringify({ repo, number: pull.number, method: mergeMethod, sha: pull.headSha }),
       });
       setMessage("Pull request merged on GitHub."); setConfirmMerge(false); onMerged();
     } catch (error) { setMessage(error instanceof Error ? error.message : "Merge failed."); }
@@ -815,7 +841,7 @@ function ReviewSidebar({
   );
 }
 
-function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, onBack }: { repo: Repository; summary: PullRequestSummary; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; onBack: () => void }) {
+function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, onStepChange, onBack }: { repo: string; number: number; initialStep: number | null; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; onStepChange: (step: number) => void; onBack: () => void }) {
   const [pull, setPull] = useState<PullRequestDetail | null>(null);
   const [replay, setReplay] = useState<ReplayResult | null>(null);
   const [step, setStep] = useState(0);
@@ -836,23 +862,25 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
   const [stateReady, setStateReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stateRevisionRef = useRef(0);
-  const cacheKey = useMemo(() => reviewCacheKey(viewer, repo.fullName, summary.number), [viewer, repo.fullName, summary.number]);
+  // The deep-linked step is read once: later step changes only rewrite the URL.
+  const bootStepRef = useRef(initialStep);
+  const cacheKey = useMemo(() => reviewCacheKey(viewer, repo, number), [viewer, repo, number]);
 
   const refreshPull = async () => {
-    const { pull } = await api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}`);
+    const { pull } = await api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo)}&number=${number}`);
     setPull(pull);
   };
   useEffect(() => {
     let active = true;
     const load = async () => {
       try {
-        const { pull } = await api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}`);
+        const { pull } = await api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo)}&number=${number}`);
         if (!active) return;
         setPull(pull);
         let cached: PullRequestState | null = null;
         try {
           const remote = await api<{ state: PullRequestState | null; revision: number }>(
-            `/api/state?repo=${encodeURIComponent(repo.fullName)}&number=${summary.number}&headSha=${encodeURIComponent(pull.headSha)}`,
+            `/api/state?repo=${encodeURIComponent(repo)}&number=${number}&headSha=${encodeURIComponent(pull.headSha)}`,
           );
           cached = remote.state;
           stateRevisionRef.current = remote.revision;
@@ -868,7 +896,8 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
         }
         if (cached) {
           setReplay(cached.replay);
-          setStep(Math.min(cached.step, Math.max(0, cached.replay.chunks.length - 1)));
+          const restored = bootStepRef.current === null ? cached.step : bootStepRef.current - 1;
+          setStep(Math.max(0, Math.min(restored, cached.replay.chunks.length - 1)));
           setComments(cached.review?.comments ?? []);
           setReviewSummary(cached.review?.summary ?? "");
           setReviewEvent(cached.review?.event ?? "COMMENT");
@@ -887,7 +916,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
     };
     void load();
     return () => { active = false; };
-  }, [repo.fullName, summary.number, cacheKey, defaultScoutModel, defaultReviewerModel]);
+  }, [repo, number, cacheKey, defaultScoutModel, defaultReviewerModel]);
   useEffect(() => {
     // A rebuild briefly removes the replay from memory; retain the last complete
     // state until its replacement is ready.
@@ -912,7 +941,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
         await api("/api/state", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repo: repo.fullName, number: summary.number, revision, state }),
+          body: JSON.stringify({ repo, number, revision, state }),
         });
         try { clearInProgressReview(window.localStorage, cacheKey); } catch { /* Storage may be unavailable. */ }
       } catch {
@@ -927,7 +956,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
       }
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [aiReview, cacheKey, comments, model, pull, replay, repo.fullName, reviewEvent, reviewSummary, reviewerModel, scoutModel, showFullDiff, stateReady, step, summary.number]);
+  }, [aiReview, cacheKey, comments, model, number, pull, replay, repo, reviewEvent, reviewSummary, reviewerModel, scoutModel, showFullDiff, stateReady, step]);
   useEffect(() => {
     if (!playing || !replay) return;
     if (step >= replay.chunks.length - 1) {
@@ -937,13 +966,19 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
     const timer = window.setTimeout(() => setStep((value) => Math.min(replay.chunks.length - 1, value + 1)), 2400);
     return () => window.clearTimeout(timer);
   }, [playing, step, replay]);
+  // Steps replace the current history entry, so Back leaves the replay instead
+  // of walking every step of it. Waiting for the restore keeps a deep-linked
+  // step in the URL until it has been applied.
+  useEffect(() => {
+    if (stateReady) onStepChange(replay ? step + 1 : 0);
+  }, [onStepChange, replay, stateReady, step]);
 
   const build = async () => {
     setBuilding(true); setError(null);
     try {
       const result = await api<{ replay: ReplayResult }>("/api/replay", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: repo.fullName, number: summary.number, model }),
+        body: JSON.stringify({ repo, number, model }),
       });
       setReplay(result.replay); setStep(0);
     } catch (error) { setError(error instanceof Error ? error.message : "Could not build replay."); }
@@ -979,7 +1014,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          repo: repo.fullName,
+          repo,
           number: pull.number,
           headSha: pull.headSha,
           scoutModel,
@@ -1035,7 +1070,7 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
   }, [replay]);
 
   if (loading || !pull) {
-    return <main className="loading-screen"><span className="spinner large" /><strong>Loading #{summary.number}</strong><span>{repo.fullName}</span>{error && <div className="error-banner">{error}</div>}</main>;
+    return <main className="loading-screen"><span className="spinner large" /><strong>Loading #{number}</strong><span>{repo}</span>{error && <div className="error-banner">{error}</div>}</main>;
   }
 
   return (
@@ -1116,12 +1151,34 @@ function ReplayWorkspace({ repo, summary, defaultModel, defaultScoutModel, defau
 
 export default function Home() {
   const [auth, setAuth] = useState<AuthState | null>(null);
-  const [selection, setSelection] = useState<{ repo: Repository; pull: PullRequestSummary } | null>(null);
+  const [route, setRoute] = useState<Route>(readRoute);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const routeRef = useRef(route);
 
   useEffect(() => {
     api<AuthState>("/api/auth/session").then(setAuth).catch(() => setAuth({ github: { connected: false, user: null }, openrouter: { connected: false, userId: null }, configured: { github: false }, defaults: { model: "openai/gpt-5-mini", scoutModel: "openai/gpt-5-mini", reviewerModel: "openai/gpt-5-mini" } }));
   }, []);
+  useEffect(() => {
+    const restore = () => {
+      routeRef.current = readRoute();
+      setRoute(routeRef.current);
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
+  // Every in-app navigation writes history here and popstate only reads it
+  // back, so the two directions cannot feed each other.
+  const navigate = useCallback((next: Route, mode: "push" | "replace") => {
+    routeRef.current = next;
+    setRoute(next);
+    const url = routeUrl(next);
+    if (mode === "push") window.history.pushState(null, "", url);
+    else window.history.replaceState(null, "", url);
+  }, []);
+  const selectRepo = useCallback((repo: string, mode: "push" | "replace") => navigate({ repo, pull: null, step: null }, mode), [navigate]);
+  const openPull = useCallback((repo: string, pull: number) => navigate({ repo, pull, step: null }, "push"), [navigate]);
+  const closePull = useCallback(() => navigate({ repo: routeRef.current.repo, pull: null, step: null }, "push"), [navigate]);
+  const syncStep = useCallback((step: number) => navigate({ ...routeRef.current, step }, "replace"), [navigate]);
   const toggleTheme = () => {
     const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;
@@ -1132,7 +1189,6 @@ export default function Home() {
     window.location.href = "/";
   };
   const requireGithubReconnect = useCallback(() => {
-    setSelection(null);
     setConnectionError("Your GitHub credentials are no longer valid. Reconnect GitHub to continue.");
     setAuth((current) => current ? {
       ...current,
@@ -1144,7 +1200,7 @@ export default function Home() {
   return (
     <div className="app-frame">
       <AppHeader auth={auth} onToggleTheme={toggleTheme} onLogout={logout} />
-      {!ready ? <ConnectionGate auth={auth} connectionError={connectionError} /> : selection ? <ReplayWorkspace repo={selection.repo} summary={selection.pull} defaultModel={auth.defaults.model} defaultScoutModel={auth.defaults.scoutModel} defaultReviewerModel={auth.defaults.reviewerModel} viewer={auth.github.user!.login} onBack={() => setSelection(null)} /> : <RepositoryPicker viewer={auth.github.user!} onOpen={(repo, pull) => setSelection({ repo, pull })} onReconnectRequired={requireGithubReconnect} />}
+      {!ready ? <ConnectionGate auth={auth} connectionError={connectionError} /> : route.repo && route.pull ? <ReplayWorkspace key={`${route.repo}#${route.pull}`} repo={route.repo} number={route.pull} initialStep={route.step} defaultModel={auth.defaults.model} defaultScoutModel={auth.defaults.scoutModel} defaultReviewerModel={auth.defaults.reviewerModel} viewer={auth.github.user!.login} onStepChange={syncStep} onBack={closePull} /> : <RepositoryPicker viewer={auth.github.user!} selectedRepo={route.repo} onSelectRepo={selectRepo} onOpen={openPull} onReconnectRequired={requireGithubReconnect} />}
     </div>
   );
 }
