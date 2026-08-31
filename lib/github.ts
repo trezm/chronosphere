@@ -42,6 +42,24 @@ export async function githubJson<T>(token: string, path: string, init?: RequestI
   return (await (await githubFetch(token, path, init)).json()) as T;
 }
 
+/** GraphQL answers 200 with an `errors` array, so failures need their own check. */
+export async function githubGraphql<T>(
+  token: string,
+  query: string,
+  variables: Record<string, unknown>
+): Promise<T> {
+  const body = await githubJson<{ data?: T; errors?: Array<{ message?: string }> }>(token, "/graphql", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (body.errors?.length) {
+    throw new Error(`GitHub: ${body.errors.map((error) => error.message || "GraphQL error").join("; ")}`);
+  }
+  if (!body.data) throw new Error("GitHub: the GraphQL response carried no data.");
+  return body.data;
+}
+
 export function parseRepo(value: string | null): { owner: string; repo: string; fullName: string } {
   const [owner, repo, ...rest] = (value ?? "").split("/");
   if (!owner || !repo || rest.length > 0 || !/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(repo)) {
