@@ -33,6 +33,18 @@ Requirements: Node.js 22.13 or newer and a GitHub OAuth App.
 
 OpenRouter does not require a client secret. Chronosphere creates a user-controlled OpenRouter key through the provider's PKCE flow and keeps it in the encrypted HTTP-only session cookie.
 
+## Durable PR state
+
+Per-user PR state uses Cloudflare D1 when a `DB` binding is present and a local SQLite file otherwise, so the store works on Cloudflare Workers and on plain Node. On the Node path the generated migrations in `drizzle/` are applied once per process, resolved from the working directory the server was started in.
+
+The database file is chosen in this order:
+
+1. `SQLITE_PATH`, if set, is used as-is.
+2. `RAILWAY_VOLUME_MOUNT_PATH`, if set, gives `<mount>/chronosphere.sqlite`.
+3. Otherwise `.data/chronosphere.sqlite` relative to the working directory.
+
+Missing parent directories are created on startup. Run `npm run db:generate` after changing `db/schema.ts`.
+
 ## Railway
 
 Create a Railway service from this repository and set:
@@ -43,10 +55,12 @@ Create a Railway service from this repository and set:
 - `SESSION_SECRET`
 - optionally `OPENROUTER_MODEL`, `OPENROUTER_SCOUT_MODEL`, and `OPENROUTER_REVIEWER_MODEL`
 
+Attach a Railway volume so PR state survives deploys and restarts. Railway sets `RAILWAY_VOLUME_MOUNT_PATH`, which Chronosphere picks up automatically; set `SQLITE_PATH` only to override that location. Without a volume the SQLite file lives on the ephemeral container filesystem and is lost on every deploy.
+
 Update the GitHub OAuth App homepage and callback to the same public origin. Railway reads `railway.json`, lets Railpack install dependencies, runs `npm run build`, starts on Railway's `$PORT`, and checks `/api/auth/session` for health.
 
 ## Security notes
 
-Provider credentials are encrypted with AES-GCM using `SESSION_SECRET` and stored only in secure, HTTP-only, same-site cookies. GitHub OAuth uses `state` and PKCE. OpenRouter OAuth uses PKCE. Replay progress, AI results, and in-progress review text are stored in D1, scoped to the signed-in GitHub user and pull request, and invalidated when the head commit changes. Browser storage is used only as a temporary fallback and migration path for drafts created before durable storage was added. Merge calls include the pull request head SHA seen by the reviewer, so GitHub rejects the action if the branch changed in the meantime.
+Provider credentials are encrypted with AES-GCM using `SESSION_SECRET` and stored only in secure, HTTP-only, same-site cookies. GitHub OAuth uses `state` and PKCE. OpenRouter OAuth uses PKCE. Replay progress, AI results, and in-progress review text are stored in D1 or in the local SQLite database, scoped to the signed-in GitHub user and pull request, and invalidated when the head commit changes. Browser storage is used only as a temporary fallback and migration path for drafts created before durable storage was added. Merge calls include the pull request head SHA seen by the reviewer, so GitHub rejects the action if the branch changed in the meantime.
 
 For a larger public deployment, replace cookie-held provider credentials with a server-side session store and add organization-specific authorization and audit retention.
