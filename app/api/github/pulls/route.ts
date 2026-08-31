@@ -1,6 +1,9 @@
 import { NextRequest } from "next/server";
-import { githubJson, githubToken, jsonError, parseRepo } from "@/lib/github";
+import { githubGraphql, githubJson, githubToken, jsonError, parseRepo } from "@/lib/github";
+import { PULL_SIZES_QUERY, applyPullSizes, pullSizeMap } from "@/lib/pull-sizes";
 import type { PullRequestSummary } from "@/lib/types";
+
+const PAGE_SIZE = 100;
 
 interface GitHubPull {
   number: number;
@@ -18,8 +21,12 @@ interface GitHubPull {
 export async function GET(request: NextRequest) {
   try {
     const token = await githubToken(request);
-    const { fullName } = parseRepo(request.nextUrl.searchParams.get("repo"));
-    const pulls = await githubJson<GitHubPull[]>(token, `/repos/${fullName}/pulls?state=open&per_page=100&sort=updated&direction=desc`);
+    const { owner, repo, fullName } = parseRepo(request.nextUrl.searchParams.get("repo"));
+    // Sizes are optional: a GraphQL failure leaves the rows without a size cluster.
+    const [pulls, sizePayload] = await Promise.all([
+      githubJson<GitHubPull[]>(token, `/repos/${fullName}/pulls?state=open&per_page=${PAGE_SIZE}&sort=updated&direction=desc`),
+      githubGraphql<unknown>(token, PULL_SIZES_QUERY, { owner, repo, first: PAGE_SIZE }).catch(() => null),
+    ]);
     const summaries: PullRequestSummary[] = pulls.map((pull) => ({
       number: pull.number,
       title: pull.title,
@@ -35,7 +42,7 @@ export async function GET(request: NextRequest) {
       deletions: 0,
       changedFiles: 0,
     }));
-    return Response.json({ pulls: summaries });
+    return Response.json({ pulls: applyPullSizes(summaries, pullSizeMap(sizePayload)) });
   } catch (error) {
     return jsonError(error);
   }
