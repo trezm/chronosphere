@@ -35,6 +35,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import Image from "next/image";
 import { api, isApiErrorWithStatus } from "@/lib/api";
 import { parseUnifiedDiff, replayStepMap } from "@/lib/diff";
+import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
 import { readReplayEvents } from "@/lib/replay-stream";
 import { findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, sortFindings } from "@/lib/review-findings";
 import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
@@ -75,6 +76,20 @@ function timeAgo(value: string): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return days < 30 ? `${days}d ago` : new Date(value).toLocaleDateString();
+}
+
+/** Reading localStorage throws outright when the browser blocks site data. */
+function browserStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** True when two timestamps are close enough that showing both adds nothing. */
+function sameMoment(a: string, b: string): boolean {
+  return Math.abs(new Date(a).getTime() - new Date(b).getTime()) < 60000;
 }
 
 function Avatar({ src, alt, size = 24 }: { src: string; alt: string; size?: number }) {
@@ -207,6 +222,7 @@ function RepositoryPicker({
   onReconnectRequired: () => void;
 }) {
   const [repositories, setRepositories] = useState<Repository[]>([]);
+  const [recentRepos, setRecentRepos] = useState<Set<string>>(() => new Set());
   const [selected, setSelected] = useState<Repository | null>(null);
   const [pulls, setPulls] = useState<PullRequestSummary[]>([]);
   const [repoSearch, setRepoSearch] = useState("");
@@ -219,10 +235,14 @@ function RepositoryPicker({
   useEffect(() => {
     api<{ repositories: Repository[] }>("/api/github/repos")
       .then(({ repositories }) => {
-        setRepositories(repositories);
-        if (repositories[0]) {
+        // Snapshot recency once so clicking a repository never reshuffles the list mid-session.
+        const recency = loadRepoRecency(browserStorage());
+        const ordered = orderByRecency(repositories, recency);
+        setRepositories(ordered);
+        setRecentRepos(new Set(Object.keys(recency)));
+        if (ordered[0]) {
           setLoadingPulls(true);
-          setSelected(repositories[0]);
+          setSelected(ordered[0]);
         }
       })
       .catch((error: unknown) => {
@@ -247,12 +267,14 @@ function RepositoryPicker({
     setLoadingPulls(true);
     setError(null);
     setSelected(repo);
+    recordRepoOpened(browserStorage(), repo.fullName);
   };
 
   const filteredRepos = repositories.filter((repo) => {
     const query = repoSearch.toLowerCase();
     return repo.fullName.toLowerCase().includes(query) || repo.description?.toLowerCase().includes(query);
   });
+  const recentEdge = filteredRepos.findLastIndex((repo) => recentRepos.has(repo.fullName));
   const filteredPulls = pulls.filter((pull) => {
     const matchesSearch = `${pull.number} ${pull.title} ${pull.author.login}`.toLowerCase().includes(prSearch.toLowerCase());
     if (!matchesSearch) return false;
@@ -283,8 +305,8 @@ function RepositoryPicker({
           </div>
           <div className="repo-list">
             {loadingRepos && <div className="empty-state"><span className="spinner" />Loading repositories…</div>}
-            {!loadingRepos && filteredRepos.map((repo) => (
-              <button key={repo.id} className={`repo-row ${selected?.id === repo.id ? "selected" : ""}`} onClick={() => selectRepository(repo)}>
+            {!loadingRepos && filteredRepos.map((repo, index) => (
+              <button key={repo.id} className={`repo-row ${selected?.id === repo.id ? "selected" : ""} ${index === recentEdge && index < filteredRepos.length - 1 ? "recent-edge" : ""}`} onClick={() => selectRepository(repo)}>
                 <Avatar src={repo.ownerAvatarUrl} alt="" size={28} />
                 <span className="repo-copy"><strong>{repo.name}</strong><span>{repo.owner} · {repo.private ? "Private" : "Public"}</span></span>
                 {repo.private && <Lock size={12} />}
@@ -312,8 +334,12 @@ function RepositoryPicker({
                   <div className="pr-title-row"><strong>{pull.title}</strong>{pull.draft && <span className="draft-badge">Draft</span>}</div>
                   <div className="pr-meta">
                     <span>opened by</span><People people={[pull.author]} />
-                    <span className="dot">·</span><span>{timeAgo(pull.updatedAt)}</span>
+                    <span className="dot">·</span><span>opened {timeAgo(pull.createdAt)}</span>
+                    {!sameMoment(pull.createdAt, pull.updatedAt) && <><span className="dot">·</span><span>updated {timeAgo(pull.updatedAt)}</span></>}
                     <span className="branch"><GitBranch size={12} />{pull.head} → {pull.base}</span>
+                    {(pull.additions > 0 || pull.deletions > 0 || pull.changedFiles > 0) && (
+                      <span className="pr-size"><span className="additions">+{pull.additions}</span><span className="deletions">−{pull.deletions}</span><span>{pull.changedFiles} files</span></span>
+                    )}
                   </div>
                   <div className="assignment-row">
                     <span><UserRoundCheck size={13} /> Assigned</span><People people={pull.assignees} />

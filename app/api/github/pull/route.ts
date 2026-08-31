@@ -12,6 +12,7 @@ interface GitHubPullDetail {
   mergeable: boolean | null;
   mergeable_state: string;
   draft: boolean;
+  created_at: string;
   updated_at: string;
   additions: number;
   deletions: number;
@@ -64,6 +65,7 @@ export async function GET(request: NextRequest) {
       assignees: pull.assignees.map((person) => ({ login: person.login, avatarUrl: person.avatar_url })),
       requestedReviewers: pull.requested_reviewers.map((person) => ({ login: person.login, avatarUrl: person.avatar_url })),
       draft: pull.draft,
+      createdAt: pull.created_at,
       updatedAt: pull.updated_at,
       head: pull.head.ref,
       base: pull.base.ref,

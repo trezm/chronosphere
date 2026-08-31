@@ -7,10 +7,12 @@ const MAX_LISTING_CHARS = 280_000;
 
 const SYSTEM_PROMPT = `You reconstruct how a pull request might have been written so a reviewer can watch the work land step by step instead of reading one wall of diff.
 
-Divide every numbered changed line into small coherent chunks and order them as a plausible implementation sequence: foundations and types first, then core logic, then callers and UI, then tests and documentation. The real order is unknown; choose the order that is easiest to understand.
+Divide every numbered changed line into coherent chunks and order them as a plausible implementation sequence: foundations and types first, then core logic, then callers and UI, then tests and documentation. The real order is unknown; choose the order that is easiest to understand.
 
 Rules:
-- Aim for roughly 1–50 changed lines per chunk, but never split a statement or block just to fit.
+- Prefer fewer, larger steps. Each chunk should be a complete unit of work a reviewer can hold in their head — typically 50–250 changed lines, and never much more than 250; past that a step becomes mentally heavy.
+- Do not fragment the diff into a long run of tiny steps: fold small mechanical changes (imports, renames, wiring, config) into the step they support rather than giving each its own chunk. A chunk may fall below the range only when the whole diff is small or a change genuinely stands alone.
+- Never split a statement or block just to fit a size target.
 - A chunk must be one contiguous [start, end] range within a single file.
 - Cover every numbered line exactly once: no gaps and no overlaps.
 - Deleted lines are numbered too and belong with the step that removes or replaces them.
