@@ -14,7 +14,87 @@ export type ReplayStreamEvent =
   | { type: "error"; error: string };
 
 /** One frame of an OpenRouter server-sent event stream. */
-export type OpenRouterFrame = { content: string } | { error: string };
+export type OpenRouterFrame = { content: string } | { error: OpenRouterError };
+
+/** Diagnostic fields OpenRouter attaches to an error, before or mid-stream. */
+export interface OpenRouterErrorDetails {
+  /** HTTP status of a non-2xx response; absent for mid-stream error frames. */
+  status?: number;
+  /** OpenRouter's own error code, numeric or symbolic (e.g. 500, "server_error"). */
+  code?: string | number;
+  /** Upstream provider that failed, when OpenRouter names one. */
+  provider?: string;
+  /** Raw upstream error body, when OpenRouter forwards one. */
+  raw?: string;
+  /** X-Generation-Id of the request, for correlating with OpenRouter's logs. */
+  generationId?: string;
+}
+
+/** Longest raw upstream error kept in the user-facing message. */
+const RAW_SNIPPET_CHARS = 200;
+
+function asText(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+/**
+ * An OpenRouter failure with its diagnostic fields kept alongside the message,
+ * so the route can log the whole picture instead of one sentence.
+ */
+export class OpenRouterError extends Error {
+  readonly status?: number;
+  readonly code?: string | number;
+  readonly provider?: string;
+  readonly raw?: string;
+  generationId?: string;
+
+  constructor(message: string | undefined, details: OpenRouterErrorDetails = {}) {
+    super(describeOpenRouterError(message, details));
+    this.name = "OpenRouterError";
+    this.status = details.status;
+    this.code = details.code;
+    this.provider = details.provider;
+    this.raw = details.raw;
+    this.generationId = details.generationId;
+  }
+
+  /** Flat, JSON-safe view of the failure for structured logs. */
+  details(): Record<string, string | number | undefined> {
+    return { message: this.message, status: this.status, code: this.code, provider: this.provider, raw: this.raw, generationId: this.generationId };
+  }
+}
+
+/** Builds the user-facing sentence: the message, then whatever OpenRouter blamed. */
+export function describeOpenRouterError(message: string | undefined, details: OpenRouterErrorDetails = {}): string {
+  const own = !message?.trim();
+  const base = message?.trim() || (details.status ? `OpenRouter returned ${details.status}` : "OpenRouter reported an error mid-stream");
+  const blame = [details.provider, details.code !== undefined && String(details.code) !== String(details.status) ? `code ${details.code}` : undefined].filter(Boolean).join(", ");
+  const raw = details.raw && details.raw !== message
+    ? details.raw.length > RAW_SNIPPET_CHARS ? `${details.raw.slice(0, RAW_SNIPPET_CHARS)}…` : details.raw
+    : undefined;
+  const tail = `${blame ? ` (${blame})` : ""}${raw ? `: ${raw}` : ""}`;
+  // OpenRouter's own sentences are passed through untouched; ours get a full stop.
+  return own && !tail ? `${base}.` : `${base}${tail}`;
+}
+
+/** The shape OpenRouter uses for error payloads, both plain JSON and SSE frames. */
+export interface OpenRouterErrorPayload {
+  error?: { message?: string; code?: string | number; metadata?: { raw?: unknown; provider_name?: string } } | string;
+}
+
+/** Reads OpenRouter's error object into an OpenRouterError; null when the payload has none. */
+export function openRouterError(payload: OpenRouterErrorPayload | null | undefined, details: OpenRouterErrorDetails = {}): OpenRouterError | null {
+  const error = payload?.error;
+  if (!error) return null;
+  if (typeof error === "string") return new OpenRouterError(error, details);
+  return new OpenRouterError(error.message, {
+    ...details,
+    code: error.code ?? details.code,
+    provider: error.metadata?.provider_name ?? details.provider,
+    raw: asText(error.metadata?.raw) ?? details.raw,
+  });
+}
 
 /** Buffers decoded text and releases only the lines that are complete. */
 export function lineBuffer() {
@@ -59,16 +139,17 @@ export function openRouterFrame(line: string): OpenRouterFrame | null {
   if (!trimmed.startsWith("data:")) return null;
   const payload = trimmed.slice("data:".length).trim();
   if (!payload || payload === "[DONE]") return null;
-  let parsed: {
+  let parsed: OpenRouterErrorPayload & {
     choices?: Array<{ delta?: { content?: string | null } }>;
-    error?: { message?: string };
+    provider?: string;
   };
   try {
     parsed = JSON.parse(payload) as typeof parsed;
   } catch {
     return null;
   }
-  if (parsed.error) return { error: parsed.error.message || "OpenRouter reported an error mid-stream." };
+  const error = openRouterError(parsed, { provider: parsed.provider });
+  if (error) return { error };
   const content = parsed.choices?.[0]?.delta?.content;
   return content ? { content } : null;
 }
@@ -79,7 +160,7 @@ export async function* readOpenRouterContent(body: ReadableStream<Uint8Array>): 
   const emit = function* (line: string): Generator<string> {
     const frame = openRouterFrame(line);
     if (!frame) return;
-    if ("error" in frame) throw new Error(frame.error);
+    if ("error" in frame) throw frame.error;
     yield frame.content;
   };
   for await (const text of decode(body)) {

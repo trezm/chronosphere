@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { lineBuffer, openRouterFrame, parseReplayEvent, readOpenRouterContent, readReplayEvents } from "../lib/replay-stream.ts";
+import { describeOpenRouterError, lineBuffer, openRouterError, OpenRouterError, openRouterFrame, parseReplayEvent, readOpenRouterContent, readReplayEvents } from "../lib/replay-stream.ts";
 
 function streamOf(chunks) {
   const encoder = new TextEncoder();
@@ -56,6 +56,39 @@ test("surfaces an OpenRouter error frame as a thrown build failure", async () =>
     ]))),
     { message: "openai/nope is not a valid model ID" },
   );
+});
+
+test("keeps OpenRouter's provider, code, and raw upstream error on a mid-stream failure", async () => {
+  const payload = {
+    id: "gen-1", provider: "Azure",
+    error: { code: 500, message: "Provider returned error", metadata: { raw: '{"error":"upstream exploded"}', provider_name: "Azure" } },
+    choices: [{ index: 0, delta: { content: "" }, finish_reason: "error" }],
+  };
+  const frame = `data: ${JSON.stringify(payload)}\n`;
+  await assert.rejects(collect(readOpenRouterContent(streamOf([frame]))), (error) => {
+    assert.ok(error instanceof OpenRouterError);
+    assert.equal(error.message, 'Provider returned error (Azure, code 500): {"error":"upstream exploded"}');
+    assert.deepEqual(error.details(), {
+      message: error.message, status: undefined, code: 500, provider: "Azure", raw: '{"error":"upstream exploded"}', generationId: undefined,
+    });
+    return true;
+  });
+});
+
+test("names the failure even when OpenRouter's error frame carries no message", () => {
+  const frame = openRouterFrame('data: {"provider":"Wafer","error":{"code":"server_error"}}');
+  assert.ok("error" in frame);
+  assert.equal(frame.error.message, "OpenRouter reported an error mid-stream (Wafer, code server_error)");
+  assert.equal(openRouterFrame('data: {"error":"plain string"}').error.message, "plain string");
+  assert.equal(openRouterError({}), null);
+  assert.equal(openRouterError(null), null);
+});
+
+test("describes a non-2xx response from its status when the body is not JSON", () => {
+  assert.equal(describeOpenRouterError(undefined, { status: 502 }), "OpenRouter returned 502.");
+  assert.equal(describeOpenRouterError(undefined, { status: 500, raw: "<html>bad gateway</html>" }), "OpenRouter returned 500: <html>bad gateway</html>");
+  assert.equal(describeOpenRouterError("Rate limited", { status: 429, code: 429, provider: "OpenAI" }), "Rate limited (OpenAI)");
+  assert.equal(describeOpenRouterError("x", { raw: "y".repeat(300) }).length, "x: ".length + 200 + 1);
 });
 
 test("reads the replay event protocol through to the done event", async () => {

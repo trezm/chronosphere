@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { githubFetch, githubJson, githubToken, jsonError, parsePullNumber, parseRepo } from "@/lib/github";
-import { buildReplay } from "@/lib/replay";
-import type { ReplayStreamEvent } from "@/lib/replay-stream";
+import { buildReplay, ReplayOutputError } from "@/lib/replay";
+import { OpenRouterError, type ReplayStreamEvent } from "@/lib/replay-stream";
 import { readSession } from "@/lib/session";
 import type { PullRequestDetail } from "@/lib/types";
 
@@ -10,7 +10,24 @@ export const maxDuration = 120;
 /** Roughly three progress events per second: alive to watch, cheap to send. */
 const PROGRESS_INTERVAL_MS = 300;
 
+/**
+ * One JSON line per failure so Railway's log explorer can filter on the
+ * fields. Everything OpenRouter told us travels along: status, code, provider,
+ * raw upstream body, and the generation id to look the request up on their side.
+ */
+function logReplayFailure(error: unknown, context: { repo: string; number: number; model?: string; elapsedMs: number }) {
+  const base = { level: "error", event: "replay.failed", ...context, error: error instanceof Error ? error.message : String(error) };
+  const detail = error instanceof OpenRouterError
+    ? { kind: "openrouter", ...error.details() }
+    : error instanceof ReplayOutputError
+      ? { kind: "model-output", output: error.snippet(), cause: error.cause instanceof Error ? error.cause.message : undefined, generationId: (error as { generationId?: string }).generationId }
+      : { kind: error instanceof Error ? error.name : typeof error, generationId: (error as { generationId?: string })?.generationId, stack: error instanceof Error ? error.stack : undefined };
+  console.error(JSON.stringify({ ...base, ...detail }));
+}
+
 export async function POST(request: NextRequest) {
+  const startedAt = Date.now();
+  let context: { repo: string; number: number; model?: string } | null = null;
   try {
     const session = await readSession(request);
     const apiKey = session.openrouter?.apiKey;
@@ -19,6 +36,7 @@ export async function POST(request: NextRequest) {
     const input = (await request.json()) as { repo?: string; number?: number; model?: string };
     const { fullName } = parseRepo(input.repo ?? null);
     const number = parsePullNumber(input.number);
+    context = { repo: fullName, number, model: input.model?.trim() || undefined };
     const [pull, diffResponse] = await Promise.all([
       githubJson<{
         number: number; title: string; body: string | null;
@@ -66,6 +84,7 @@ export async function POST(request: NextRequest) {
           });
           send({ type: "done", replay });
         } catch (error) {
+          logReplayFailure(error, { repo: fullName, number, model: input.model?.trim() || undefined, elapsedMs: Date.now() - startedAt });
           send({ type: "error", error: error instanceof Error ? error.message : "Could not build the replay." });
         } finally {
           try {
@@ -84,6 +103,9 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
+    // Validation and GitHub failures before the stream opens; the response
+    // status says most of it, so log only what the client cannot show.
+    console.warn(JSON.stringify({ level: "warn", event: "replay.rejected", ...context, error: error instanceof Error ? error.message : String(error) }));
     return jsonError(error);
   }
 }
