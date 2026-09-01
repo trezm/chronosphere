@@ -1,6 +1,6 @@
 import { changedLines, normalizeReplayChunks, parseUnifiedDiff } from "./diff";
 import { defaultOpenRouterModel } from "./config";
-import { readOpenRouterContent } from "./replay-stream";
+import { OpenRouterError, openRouterError, type OpenRouterErrorPayload, readOpenRouterContent } from "./replay-stream";
 import type { PullRequestDetail, ReplayResult } from "./types";
 
 const MAX_LISTING_CHARS = 280_000;
@@ -50,10 +50,32 @@ function listing(diff: string): { text: string; truncated: boolean } {
   return { text: output.trim(), truncated };
 }
 
+/** Longest slice of model output kept when reporting unparseable JSON. */
+const OUTPUT_SNIPPET_CHARS = 400;
+
+/** Thrown when the model's output is not the JSON the prompt asked for. */
+export class ReplayOutputError extends Error {
+  constructor(message: string, readonly output: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "ReplayOutputError";
+  }
+
+  /** Head and tail of the offending output, for logs. */
+  snippet(): string {
+    if (this.output.length <= OUTPUT_SNIPPET_CHARS) return this.output;
+    const half = OUTPUT_SNIPPET_CHARS / 2;
+    return `${this.output.slice(0, half)} … ${this.output.slice(-half)}`;
+  }
+}
+
 function parseModelJson(content: string): { chunks?: unknown[] } {
   const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
   const candidate = fenced ?? content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1);
-  return JSON.parse(candidate) as { chunks?: unknown[] };
+  try {
+    return JSON.parse(candidate) as { chunks?: unknown[] };
+  } catch (cause) {
+    throw new ReplayOutputError("The model returned a replay that was not valid JSON.", content, cause);
+  }
 }
 
 export interface BuildReplayOptions {
@@ -98,21 +120,36 @@ export async function buildReplay(
       ],
     }),
   });
+  const generationId = response.headers.get("x-generation-id") ?? undefined;
   if (!response.ok) {
-    // OpenRouter reports bad models and bad keys as a JSON body, streaming or not.
-    const body = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
-    throw new Error(body?.error?.message || `OpenRouter returned ${response.status}.`);
+    // OpenRouter reports bad models and bad keys as a JSON body, streaming or
+    // not; when the body is not JSON, keep it raw so the log still shows it.
+    const text = await response.text().catch(() => "");
+    let payload: OpenRouterErrorPayload | null = null;
+    try {
+      payload = JSON.parse(text) as typeof payload;
+    } catch {
+      payload = null;
+    }
+    const details = { status: response.status, generationId, raw: payload ? undefined : text.trim() || undefined };
+    throw openRouterError(payload, details) ?? new OpenRouterError(undefined, details);
   }
-  if (!response.body) throw new Error("OpenRouter returned an empty replay.");
-  let content = "";
-  for await (const delta of readOpenRouterContent(response.body)) {
-    content += delta;
-    options.onProgress?.(content.length);
+  if (!response.body) throw new OpenRouterError("OpenRouter returned an empty replay.", { generationId });
+  try {
+    let content = "";
+    for await (const delta of readOpenRouterContent(response.body)) {
+      content += delta;
+      options.onProgress?.(content.length);
+    }
+    if (!content) throw new OpenRouterError("OpenRouter returned an empty replay.", { generationId });
+    options.onParse?.();
+    const parsed = parseModelJson(content);
+    const chunks = normalizeReplayChunks((parsed.chunks ?? []) as never[], files);
+    if (!chunks.length) throw new ReplayOutputError("The model did not return any usable replay steps.", content);
+    return { model, chunks, truncated: numbered.truncated };
+  } catch (error) {
+    // Anything that fails after the model call started belongs to this generation.
+    if (error instanceof Error && !(error as { generationId?: string }).generationId) Object.assign(error, { generationId });
+    throw error;
   }
-  if (!content) throw new Error("OpenRouter returned an empty replay.");
-  options.onParse?.();
-  const parsed = parseModelJson(content);
-  const chunks = normalizeReplayChunks((parsed.chunks ?? []) as never[], files);
-  if (!chunks.length) throw new Error("The model did not return any usable replay steps.");
-  return { model, chunks, truncated: numbered.truncated };
 }
