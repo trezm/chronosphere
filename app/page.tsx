@@ -21,6 +21,7 @@ import {
   Pause,
   Pencil,
   Play,
+  RefreshCw,
   RotateCcw,
   Search,
   ShieldCheck,
@@ -259,6 +260,8 @@ function RepositoryPicker({
   const [prSearch, setPrSearch] = useState("");
   const [involvement, setInvolvement] = useState<"all" | "mine" | "assigned" | "review">("all");
   const [loadingRepos, setLoadingRepos] = useState(true);
+  const [pullsRefreshKey, setPullsRefreshKey] = useState(0);
+  const [refreshingPulls, setRefreshingPulls] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadingPulls = !!selectedRepo && pulls.repo !== selectedRepo;
 
@@ -287,14 +290,23 @@ function RepositoryPicker({
     onSelectRepo(repositories[0].fullName, "replace");
   }, [onSelectRepo, repositories, selectedRepo]);
 
+  // pullsRefreshKey re-runs the fetch for the same repository when the user
+  // clicks refresh; the existing list stays on screen until the new one lands.
   useEffect(() => {
     if (!selectedRepo) return;
     let stale = false;
     api<{ pulls: PullRequestSummary[] }>(`/api/github/pulls?repo=${encodeURIComponent(selectedRepo)}`)
       .then(({ pulls }) => { if (!stale) { setError(null); setPulls({ repo: selectedRepo, items: pulls }); } })
-      .catch((e: Error) => { if (!stale) { setError(e.message); setPulls({ repo: selectedRepo, items: [] }); } });
+      .catch((e: Error) => { if (!stale) { setError(e.message); setPulls({ repo: selectedRepo, items: [] }); } })
+      .finally(() => { if (!stale) setRefreshingPulls(false); });
     return () => { stale = true; };
-  }, [selectedRepo]);
+  }, [selectedRepo, pullsRefreshKey]);
+
+  const refreshPulls = () => {
+    if (!selectedRepo || loadingPulls || refreshingPulls) return;
+    setRefreshingPulls(true);
+    setPullsRefreshKey((key) => key + 1);
+  };
 
   const filteredRepos = repositories.filter((repo) => {
     const query = repoSearch.toLowerCase();
@@ -344,7 +356,12 @@ function RepositoryPicker({
         <div className="pr-panel">
           <div className="panel-heading pr-heading">
             <div><span className="kicker">Open pull requests</span><strong>{selectedRepo ?? "Select a repository"}</strong></div>
-            <label className="search-field"><Search size={15} /><input value={prSearch} onChange={(event) => setPrSearch(event.target.value)} placeholder="Filter pull requests" aria-label="Filter pull requests" /></label>
+            <div className="pr-heading-tools">
+              <label className="search-field"><Search size={15} /><input value={prSearch} onChange={(event) => setPrSearch(event.target.value)} placeholder="Filter pull requests" aria-label="Filter pull requests" /></label>
+              <button type="button" className="icon-button refresh-button" onClick={refreshPulls} disabled={!selectedRepo || loadingPulls || refreshingPulls} aria-label="Refresh pull requests" title="Refresh pull requests">
+                <RefreshCw size={15} className={refreshingPulls ? "spinning" : ""} />
+              </button>
+            </div>
           </div>
           <div className="filter-bar" role="group" aria-label="Pull request involvement">
             {([['all', 'All open'], ['mine', 'Authored by me'], ['assigned', 'Assigned to me'], ['review', 'Review requested']] as const).map(([value, label]) => (
