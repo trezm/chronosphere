@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeReplayChunks, parseUnifiedDiff, replayStepMap } from "../lib/diff.ts";
+import { chunkFiles, inRanges, normalizeReplayChunks, parseUnifiedDiff, replayStepMap } from "../lib/diff.ts";
 
 const sample = `diff --git a/src/math.ts b/src/math.ts
 index 1111111..2222222 100644
@@ -63,4 +63,75 @@ test("preserves explicit model impact markings and defaults other steps to false
 
   assert.equal(chunks[0].impactful, true);
   assert.equal(chunks[1].impactful, false);
+});
+
+const twoFiles = `diff --git a/src/shape.ts b/src/shape.ts
+new file mode 100644
+--- /dev/null
++++ b/src/shape.ts
+@@ -0,0 +1,3 @@
++export interface Shape {
++  area(): number;
++}
+diff --git a/src/circle.ts b/src/circle.ts
+new file mode 100644
+--- /dev/null
++++ b/src/circle.ts
+@@ -0,0 +1,4 @@
++import type { Shape } from "./shape";
++export class Circle implements Shape {
++  area() { return 1; }
++}
+`;
+
+test("keeps ranges from several files together in one step", () => {
+  const files = parseUnifiedDiff(twoFiles);
+  const chunks = normalizeReplayChunks(
+    [{ ranges: [{ start: 1, end: 3 }, { start: 5, end: 7 }], title: "Shape and Circle", description: "Defines the interface and its implementation." }],
+    files,
+  );
+
+  assert.equal(chunks.length, 2);
+  assert.deepEqual(chunks[0].ranges, [
+    { file: "src/shape.ts", start: 1, end: 3 },
+    { file: "src/circle.ts", start: 5, end: 7 },
+  ]);
+  assert.deepEqual(chunkFiles(chunks[0]), ["src/shape.ts", "src/circle.ts"]);
+  assert.equal(chunks[1].title, "Remaining changes");
+  assert.deepEqual(chunks[1].ranges, [{ file: "src/circle.ts", start: 4, end: 4 }]);
+  assert.equal(replayStepMap(chunks).get(4), 1);
+  assert.equal(replayStepMap(chunks).get(6), 0);
+});
+
+test("splits a range that crosses a file boundary into one range per file", () => {
+  const files = parseUnifiedDiff(twoFiles);
+  const chunks = normalizeReplayChunks([{ start: 2, end: 5, title: "Straddle", description: "" }], files);
+
+  assert.deepEqual(chunks[0].ranges, [
+    { file: "src/shape.ts", start: 2, end: 3 },
+    { file: "src/circle.ts", start: 4, end: 5 },
+  ]);
+});
+
+test("drops overlapping lines and steps with nothing left to claim", () => {
+  const files = parseUnifiedDiff(twoFiles);
+  const chunks = normalizeReplayChunks(
+    [
+      { ranges: [{ start: 1, end: 7 }], title: "Everything", description: "" },
+      { ranges: [{ start: 2, end: 3 }], title: "Duplicate", description: "" },
+      { ranges: [], title: "Empty", description: "" },
+    ],
+    files,
+  );
+
+  assert.deepEqual(chunks.map((chunk) => chunk.title), ["Everything"]);
+  assert.equal(replayStepMap(chunks).size, 7);
+});
+
+test("inRanges only matches numbered lines inside a range", () => {
+  const ranges = [{ file: "a.ts", start: 2, end: 3 }, { file: "b.ts", start: 9, end: 9 }];
+  assert.equal(inRanges(ranges, 2), true);
+  assert.equal(inRanges(ranges, 9), true);
+  assert.equal(inRanges(ranges, 4), false);
+  assert.equal(inRanges(ranges, null), false);
 });

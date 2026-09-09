@@ -3,9 +3,11 @@ import test from "node:test";
 import {
   clearInProgressReview,
   isInProgressReview,
+  isReplay,
   loadInProgressReview,
   reviewCacheKey,
   saveInProgressReview,
+  upgradeReplay,
 } from "../lib/review-cache.ts";
 
 function memoryStorage() {
@@ -24,7 +26,7 @@ const review = {
   headSha: "abc123",
   replay: {
     model: "openai/gpt-5-mini",
-    chunks: [{ file: "app.ts", start: 1, end: 2, title: "Add app", description: "Adds the app." }],
+    chunks: [{ ranges: [{ file: "app.ts", start: 1, end: 2 }], title: "Add app", description: "Adds the app." }],
     truncated: false,
   },
   step: 0,
@@ -100,4 +102,31 @@ test("validates durable PR state before it reaches the client", () => {
       truncated: false,
     },
   }), false);
+});
+
+test("accepts replays stored before steps could span files and upgrades them in place", () => {
+  const legacy = {
+    model: "openai/gpt-5-mini",
+    truncated: false,
+    chunks: [
+      { file: "app.ts", start: 1, end: 2, title: "Add app", description: "Adds the app.", impactful: true },
+      { ranges: [{ file: "lib.ts", start: 3, end: 3 }, { file: "app.ts", start: 4, end: 5 }], title: "Wire it", description: "" },
+    ],
+  };
+  assert.equal(isReplay(legacy), true);
+
+  const upgraded = upgradeReplay(legacy);
+  assert.deepEqual(upgraded.chunks, [
+    { ranges: [{ file: "app.ts", start: 1, end: 2 }], title: "Add app", description: "Adds the app.", impactful: true },
+    legacy.chunks[1],
+  ]);
+  assert.equal(upgradeReplay(upgraded), upgraded);
+});
+
+test("rejects replay steps whose ranges are missing or malformed", () => {
+  const base = { model: "openai/gpt-5-mini", truncated: false };
+  assert.equal(isReplay({ ...base, chunks: [{ ranges: [], title: "Empty", description: "" }] }), false);
+  assert.equal(isReplay({ ...base, chunks: [{ ranges: [{ file: "a.ts", start: 3, end: 2 }], title: "Backwards", description: "" }] }), false);
+  assert.equal(isReplay({ ...base, chunks: [{ ranges: [{ start: 1, end: 2 }], title: "No file", description: "" }] }), false);
+  assert.equal(isReplay({ ...base, chunks: [{ title: "No coverage", description: "" }] }), false);
 });

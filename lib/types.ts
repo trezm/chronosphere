@@ -69,10 +69,20 @@ export interface DiffFile {
   hunks: DiffHunk[];
 }
 
-export interface ReplayChunk {
+/** One contiguous run of numbered changed lines inside a single file. */
+export interface ReplayRange {
   file: string;
   start: number;
   end: number;
+}
+
+/**
+ * One replay step. A step usually covers one range, but related work that
+ * lives in several files (a trait and its implementation, a type and its
+ * caller) can be shown together as several ranges.
+ */
+export interface ReplayChunk {
+  ranges: ReplayRange[];
   title: string;
   description: string;
   impactful?: boolean;

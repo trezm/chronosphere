@@ -6,7 +6,7 @@ const legacy = {
   headSha: "0123456789012345678901234567890123456789",
   replay: {
     model: "openai/gpt-5-mini",
-    chunks: [{ file: "app.ts", start: 1, end: 2, title: "Add app", description: "Adds the app." }],
+    chunks: [{ ranges: [{ file: "app.ts", start: 1, end: 2 }], title: "Add app", description: "Adds the app." }],
     truncated: false,
   },
   step: 0,

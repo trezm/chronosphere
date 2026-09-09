@@ -12,6 +12,7 @@ The replay is explicitly a model-generated reconstruction, not recorded history.
 - Involvement filters for authored, assigned, and review-requested PRs
 - Author, assignee, and requested-reviewer context
 - LLM-generated replay timeline with playable/scrubbable diff states
+- Steps that span several files, such as a trait and its implementation, shown as file tabs above the diff
 - Model-selected high-impact markers for the most consequential replay steps
 - On-demand two-stage AI review: a scout triages the diff, then a reviewer returns high-confidence findings
 - AI findings that can be staged individually or in bulk as editable GitHub review comments

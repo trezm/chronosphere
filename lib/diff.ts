@@ -1,4 +1,4 @@
-import type { DiffFile, DiffHunk, DiffLine, ReplayChunk } from "./types";
+import type { DiffFile, DiffHunk, DiffLine, ReplayChunk, ReplayRange } from "./types";
 
 function cleanPath(path: string): string {
   return path.replace(/^[ab]\//, "").replace(/^"|"$/g, "");
@@ -82,8 +82,36 @@ export function changedLines(files: DiffFile[]): Array<{ file: DiffFile; line: D
   );
 }
 
+/** The shapes the model may use for one step's line coverage. */
+export interface RawReplayChunk {
+  /** Legacy single range. */
+  start?: unknown;
+  end?: unknown;
+  /** Several ranges, possibly in different files, shown together. */
+  ranges?: unknown;
+  title?: unknown;
+  description?: unknown;
+  impactful?: unknown;
+}
+
+function candidateRanges(candidate: RawReplayChunk, total: number): Array<{ start: number; end: number }> {
+  const raw: Array<{ start?: unknown; end?: unknown }> = Array.isArray(candidate.ranges) ? candidate.ranges : [];
+  if (candidate.start !== undefined || candidate.end !== undefined) raw.push({ start: candidate.start, end: candidate.end });
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const range of raw) {
+    if (!range || typeof range !== "object") continue;
+    const a = Math.floor(Number(range.start));
+    const b = Math.floor(Number(range.end));
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    const start = Math.max(1, Math.min(a, b));
+    const end = Math.min(total, Math.max(a, b));
+    if (start <= end) ranges.push({ start, end });
+  }
+  return ranges.sort((left, right) => left.start - right.start);
+}
+
 export function normalizeReplayChunks(
-  raw: Array<Partial<ReplayChunk>>,
+  raw: RawReplayChunk[],
   files: DiffFile[]
 ): ReplayChunk[] {
   const changed = changedLines(files);
@@ -91,12 +119,18 @@ export function normalizeReplayChunks(
   const claimed = new Set<number>();
   const chunks: ReplayChunk[] = [];
 
-  const addRange = (start: number, end: number, title: string, description: string, impactful = false) => {
+  /**
+   * Claims every still-unclaimed line in [start, end], split into contiguous
+   * single-file segments, so a range that straddles a file boundary or an
+   * already-claimed line still becomes valid ranges.
+   */
+  const claimRange = (start: number, end: number): ReplayRange[] => {
+    const ranges: ReplayRange[] = [];
     let segmentStart: number | null = null;
     let segmentFile = "";
     const close = (segmentEnd: number) => {
       if (segmentStart === null) return;
-      chunks.push({ file: segmentFile, start: segmentStart, end: segmentEnd, title, description, impactful });
+      ranges.push({ file: segmentFile, start: segmentStart, end: segmentEnd });
       segmentStart = null;
     };
     for (let index = start; index <= end; index++) {
@@ -113,22 +147,19 @@ export function normalizeReplayChunks(
       claimed.add(index);
     }
     close(end);
+    return ranges;
   };
 
   for (const candidate of raw ?? []) {
-    const a = Math.floor(Number(candidate.start));
-    const b = Math.floor(Number(candidate.end));
-    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
-    const start = Math.max(1, Math.min(a, b));
-    const end = Math.min(changed.length, Math.max(a, b));
-    if (start > end) continue;
-    addRange(
-      start,
-      end,
-      String(candidate.title ?? "").trim() || "Implementation step",
-      String(candidate.description ?? "").trim(),
-      candidate.impactful === true
-    );
+    if (!candidate || typeof candidate !== "object") continue;
+    const ranges = candidateRanges(candidate, changed.length).flatMap((range) => claimRange(range.start, range.end));
+    if (!ranges.length) continue;
+    chunks.push({
+      ranges,
+      title: String(candidate.title ?? "").trim() || "Implementation step",
+      description: String(candidate.description ?? "").trim(),
+      impactful: candidate.impactful === true,
+    });
   }
 
   for (let index = 1; index <= changed.length; index++) {
@@ -142,17 +173,37 @@ export function normalizeReplayChunks(
     ) {
       end++;
     }
-    addRange(index, end, "Remaining changes", "Changes the model did not include in another step.");
+    chunks.push({
+      ranges: claimRange(index, end),
+      title: "Remaining changes",
+      description: "Changes the model did not include in another step.",
+      impactful: false,
+    });
     index = end;
   }
 
   return chunks;
 }
 
+/** The distinct files a step touches, in the order its ranges visit them. */
+export function chunkFiles(chunk: Pick<ReplayChunk, "ranges">): string[] {
+  const files: string[] = [];
+  for (const range of chunk.ranges) if (!files.includes(range.file)) files.push(range.file);
+  return files;
+}
+
+/** Whether a numbered changed line belongs to one of the given ranges. */
+export function inRanges(ranges: readonly ReplayRange[], changedIndex: number | null): boolean {
+  if (changedIndex === null) return false;
+  return ranges.some((range) => changedIndex >= range.start && changedIndex <= range.end);
+}
+
 export function replayStepMap(chunks: ReplayChunk[]): Map<number, number> {
   const map = new Map<number, number>();
   chunks.forEach((chunk, step) => {
-    for (let index = chunk.start; index <= chunk.end; index++) map.set(index, step);
+    for (const range of chunk.ranges) {
+      for (let index = range.start; index <= range.end; index++) map.set(index, step);
+    }
   });
   return map;
 }

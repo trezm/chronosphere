@@ -1,4 +1,4 @@
-import { changedLines, normalizeReplayChunks, parseUnifiedDiff } from "./diff";
+import { changedLines, normalizeReplayChunks, parseUnifiedDiff, type RawReplayChunk } from "./diff";
 import { defaultOpenRouterModel } from "./config";
 import { OpenRouterError, openRouterError, type OpenRouterErrorPayload, readOpenRouterContent } from "./replay-stream";
 import type { PullRequestDetail, ReplayResult } from "./types";
@@ -7,18 +7,18 @@ const MAX_LISTING_CHARS = 280_000;
 
 const SYSTEM_PROMPT = `You reconstruct how a pull request might have been written so a reviewer can watch the work land step by step instead of reading one wall of diff.
 
-Divide every numbered changed line into coherent chunks and order them as a plausible implementation sequence: foundations and types first, then core logic, then callers and UI, then tests and documentation. The real order is unknown; choose the order that is easiest to understand.
+Divide every numbered changed line into coherent steps and order them as a plausible implementation sequence: foundations and types first, then core logic, then callers and UI, then tests and documentation. The real order is unknown; choose the order that is easiest to understand.
 
 Rules:
-- Prefer fewer, larger steps. Each chunk should be a complete unit of work a reviewer can hold in their head — typically 50–250 changed lines, and never much more than 250; past that a step becomes mentally heavy.
-- Do not fragment the diff into a long run of tiny steps: fold small mechanical changes (imports, renames, wiring, config) into the step they support rather than giving each its own chunk. A chunk may fall below the range only when the whole diff is small or a change genuinely stands alone.
+- Prefer fewer, larger steps. Each step should be a complete unit of work a reviewer can hold in their head — typically 50–250 changed lines in total, and never much more than 250; past that a step becomes mentally heavy.
+- Do not fragment the diff into a long run of tiny steps: fold small mechanical changes (imports, renames, wiring, config) into the step they support rather than giving each its own step. A step may fall below the range only when the whole diff is small or a change genuinely stands alone.
+- A step is a list of ranges. Each range must be one contiguous [start, end] run of numbered lines within a single file, but one step may hold several ranges from different files when they are one unit of work: a trait or interface together with its implementation, a type together with the code that first uses it, a function together with its test. Do not combine unrelated changes just because they are small.
 - Never split a statement or block just to fit a size target.
-- A chunk must be one contiguous [start, end] range within a single file.
-- Cover every numbered line exactly once: no gaps and no overlaps.
+- Cover every numbered line exactly once across all ranges: no gaps and no overlaps.
 - Deleted lines are numbered too and belong with the step that removes or replaces them.
 - Narrate what the code does in plain language. Do not review, judge, or invent intent.
 - Mark only the few most consequential steps as impactful: steps that establish a central behavior or contract, affect many downstream callers, or carry notable correctness or security consequences. Most steps should be false.
-- Return only JSON matching: {"chunks":[{"start":1,"end":3,"title":"Short title","description":"One or two sentences.","impactful":true}]}`;
+- Return only JSON matching: {"chunks":[{"ranges":[{"start":1,"end":3},{"start":40,"end":52}],"title":"Short title","description":"One or two sentences.","impactful":true}]}`;
 
 function listing(diff: string): { text: string; truncated: boolean } {
   const files = parseUnifiedDiff(diff);
@@ -144,7 +144,7 @@ export async function buildReplay(
     if (!content) throw new OpenRouterError("OpenRouter returned an empty replay.", { generationId });
     options.onParse?.();
     const parsed = parseModelJson(content);
-    const chunks = normalizeReplayChunks((parsed.chunks ?? []) as never[], files);
+    const chunks = normalizeReplayChunks((parsed.chunks ?? []) as RawReplayChunk[], files);
     if (!chunks.length) throw new ReplayOutputError("The model did not return any usable replay steps.", content);
     return { model, chunks, truncated: numbered.truncated };
   } catch (error) {
