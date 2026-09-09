@@ -1,4 +1,4 @@
-import type { AiReviewResult, PendingComment, ReplayResult } from "./types";
+import type { AiReviewResult, PendingComment, ReplayChunk, ReplayRange, ReplayResult } from "./types";
 
 export type ReviewEvent = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
 
@@ -31,6 +31,32 @@ export function isReviewEvent(value: unknown): value is ReviewEvent {
   return value === "COMMENT" || value === "APPROVE" || value === "REQUEST_CHANGES";
 }
 
+function isReplayRange(value: unknown): value is ReplayRange {
+  if (!value || typeof value !== "object") return false;
+  const range = value as Partial<ReplayRange>;
+  return typeof range.file === "string"
+    && Number.isInteger(range.start)
+    && (range.start as number) >= 0
+    && Number.isInteger(range.end)
+    && (range.end as number) >= (range.start as number);
+}
+
+/** The single-range step shape stored before steps could span files. */
+type LegacyReplayChunk = Omit<ReplayChunk, "ranges"> & ReplayRange;
+
+function isReplayChunk(value: unknown): value is ReplayChunk | LegacyReplayChunk {
+  if (!value || typeof value !== "object") return false;
+  const chunk = value as Partial<ReplayChunk> & Partial<ReplayRange>;
+  const coverage = Array.isArray(chunk.ranges)
+    ? chunk.ranges.length > 0 && chunk.ranges.every(isReplayRange)
+    : isReplayRange(chunk);
+  return coverage
+    && typeof chunk.title === "string"
+    && typeof chunk.description === "string"
+    && (chunk.impactful === undefined || typeof chunk.impactful === "boolean");
+}
+
+/** Accepts replays stored in either the current or the legacy single-range step shape. */
 export function isReplay(value: unknown): value is ReplayResult {
   if (!value || typeof value !== "object") return false;
   const replay = value as Partial<ReplayResult>;
@@ -38,15 +64,17 @@ export function isReplay(value: unknown): value is ReplayResult {
     && typeof replay.truncated === "boolean"
     && Array.isArray(replay.chunks)
     && replay.chunks.length > 0
-    && replay.chunks.every((chunk) => !!chunk
-      && typeof chunk.file === "string"
-      && Number.isInteger(chunk.start)
-      && chunk.start >= 0
-      && Number.isInteger(chunk.end)
-      && chunk.end >= chunk.start
-      && typeof chunk.title === "string"
-      && typeof chunk.description === "string"
-      && (chunk.impactful === undefined || typeof chunk.impactful === "boolean"));
+    && replay.chunks.every(isReplayChunk);
+}
+
+/** Rewrites legacy single-range steps into the current multi-range shape. */
+export function upgradeReplay(replay: ReplayResult): ReplayResult {
+  const chunks = (replay.chunks as Array<ReplayChunk | LegacyReplayChunk>).map((chunk): ReplayChunk => {
+    if ("ranges" in chunk && Array.isArray(chunk.ranges)) return chunk;
+    const { file, start, end, ...rest } = chunk as LegacyReplayChunk;
+    return { ...rest, ranges: [{ file, start, end }] };
+  });
+  return chunks.every((chunk, index) => chunk === replay.chunks[index]) ? replay : { ...replay, chunks };
 }
 
 export function isPendingComment(value: unknown): value is PendingComment {

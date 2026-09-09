@@ -92,7 +92,7 @@ test("describes a non-2xx response from its status when the body is not JSON", (
 });
 
 test("reads the replay event protocol through to the done event", async () => {
-  const replay = { model: "openai/gpt-5-mini", truncated: false, chunks: [{ file: "lib/replay.ts", start: 1, end: 3, title: "Add", description: "One step.", impactful: false }] };
+  const replay = { model: "openai/gpt-5-mini", truncated: false, chunks: [{ ranges: [{ file: "lib/replay.ts", start: 1, end: 3 }], title: "Add", description: "One step.", impactful: false }] };
   const events = await collect(readReplayEvents(streamOf([
     '{"type":"progress","chars":512}\n{"type":"progress","cha',
     'rs":2048}\n{"type":"parsing"}\n',

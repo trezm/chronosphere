@@ -35,7 +35,7 @@ import {
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { api, isApiErrorWithStatus } from "@/lib/api";
-import { parseUnifiedDiff, replayStepMap } from "@/lib/diff";
+import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap } from "@/lib/diff";
 import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
 import { readReplayEvents } from "@/lib/replay-stream";
 import { findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, sortFindings } from "@/lib/review-findings";
@@ -45,6 +45,7 @@ import {
   loadInProgressReview,
   reviewCacheKey,
   saveInProgressReview,
+  upgradeReplay,
   type ReviewEvent,
 } from "@/lib/review-cache";
 import { migrateInProgressReview, type PullRequestState } from "@/lib/review-state";
@@ -56,6 +57,7 @@ import type {
   PullRequestDetail,
   PullRequestSummary,
   ReplayChunk,
+  ReplayRange,
   ReplayResult,
   Repository,
   ReviewFinding,
@@ -400,10 +402,17 @@ function RepositoryPicker({
   );
 }
 
+/** How a step's files read in the timeline and narration: one path, or the basenames of several. */
+function stepFilesLabel(chunk: ReplayChunk): string {
+  const paths = chunkFiles(chunk);
+  if (paths.length === 1) return paths[0];
+  return paths.map((path) => path.slice(path.lastIndexOf("/") + 1)).join(", ");
+}
+
 function ReplayFileView({
   file,
   step,
-  currentRange,
+  currentRanges,
   replayChunks,
   changeSteps,
   showFullDiff,
@@ -416,10 +425,12 @@ function ReplayFileView({
   onUpdate,
   onDelete,
   onGoToStep,
+  hidden = false,
 }: {
   file: DiffFile;
   step: number;
-  currentRange: { start: number; end: number } | null;
+  /** The current step's ranges, across every file; only this file's apply here. */
+  currentRanges: readonly ReplayRange[];
   replayChunks: ReplayChunk[];
   changeSteps: ReadonlyMap<number, number>;
   showFullDiff: boolean;
@@ -431,7 +442,9 @@ function ReplayFileView({
   onAddFinding: (finding: ReviewFinding) => void;
   onUpdate: (id: string, body: string) => void;
   onDelete: (id: string) => void;
-  onGoToStep: (step: number) => void;
+  onGoToStep: (step: number, file: string) => void;
+  /** Keeps the view mounted, with its composer and expanded context, while another file's tab is active. */
+  hidden?: boolean;
 }) {
   const [target, setTarget] = useState<{ line: number; side: "LEFT" | "RIGHT"; index: number | null } | null>(null);
   const [body, setBody] = useState("");
@@ -449,6 +462,7 @@ function ReplayFileView({
     [file.hunks, file.path]
   );
   const fileComments = comments.filter((comment) => comment.path === file.path);
+  const fileRanges = useMemo(() => currentRanges.filter((range) => range.file === file.path), [currentRanges, file.path]);
   const visibleHunks = file.hunks
     .map((hunk, originalIndex) => ({
       ...hunk,
@@ -458,7 +472,7 @@ function ReplayFileView({
       // not make the line-number geometry jump. Future code is masked below.
       lines: hunk.lines,
     }))
-    .filter((hunk) => showFullDiff || hunk.sourceLines.some((line) => line.changedIndex !== null && currentRange && line.changedIndex >= currentRange.start && line.changedIndex <= currentRange.end));
+    .filter((hunk) => showFullDiff || hunk.sourceLines.some((line) => inRanges(fileRanges, line.changedIndex)));
   useEffect(() => {
     let stale = false;
     Promise.all(file.hunks.map((hunk) => highlightLines(hunk.lines.map((line) => line.text), syntaxLanguage)))
@@ -565,7 +579,7 @@ function ReplayFileView({
     cancelEditing();
   };
   return (
-    <article className="diff-file">
+    <article className="diff-file" hidden={hidden}>
       <header><span className="file-dot" /> <code>{file.oldPath && file.oldPath !== file.path ? `${file.oldPath} → ` : ""}{file.path}</code><span>{fileComments.length ? `${fileComments.length} pending` : file.status}</span></header>
       <div className="diff-table">
         {visibleHunks.map((hunk) => {
@@ -581,7 +595,7 @@ function ReplayFileView({
             {contextRows(hunkBounds.first - expansion.before, hunkBounds.first - 1)}
             <div className="hunk-row"><span /><span /><code>{hunk.header}</code></div>
             {hunk.lines.map((line, lineIndex) => {
-              const current = line.changedIndex !== null && currentRange && line.changedIndex >= currentRange.start && line.changedIndex <= currentRange.end;
+              const current = inRanges(fileRanges, line.changedIndex);
               const lineStep = line.changedIndex === null ? undefined : changeSteps.get(line.changedIndex);
               const past = !showFullDiff && lineStep !== undefined && lineStep < step;
               const future = !showFullDiff && lineStep !== undefined && lineStep > step;
@@ -606,7 +620,7 @@ function ReplayFileView({
                     {future ? (
                       <code className="future-change-note">
                         {startsFutureGroup && futureChunk ? (
-                          <button onClick={() => onGoToStep(lineStep)} title={`Go to Step ${lineStep + 1}: ${futureChunk.title}`}>
+                          <button onClick={() => onGoToStep(lineStep, file.path)} title={`Go to Step ${lineStep + 1}: ${futureChunk.title}`}>
                             <ArrowRight size={11} /> Later in Step {lineStep + 1} <span>· {futureChunk.title}</span>
                           </button>
                         ) : <span aria-hidden="true" />}
@@ -915,6 +929,8 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const [aiReviewBusy, setAiReviewBusy] = useState(false);
   const [aiReviewError, setAiReviewError] = useState<string | null>(null);
   const [showFullDiff, setShowFullDiff] = useState(false);
+  // The file tab chosen for one step; any other step falls back to its first file.
+  const [fileTab, setFileTab] = useState<{ step: number; file: string } | null>(null);
   const [stateReady, setStateReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLOListElement>(null);
@@ -953,7 +969,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           catch { /* Browser privacy settings must not block review work. */ }
         }
         if (cached) {
-          setReplay(cached.replay);
+          setReplay(upgradeReplay(cached.replay));
           const restored = bootStepRef.current === null ? cached.step : bootStepRef.current - 1;
           setStep(Math.max(0, Math.min(restored, cached.replay.chunks.length - 1)));
           setComments(cached.review?.comments ?? []);
@@ -1082,11 +1098,19 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
 
   const files = useMemo(() => parseUnifiedDiff(pull?.diff ?? ""), [pull?.diff]);
   const chunk = replay?.chunks[step] ?? null;
+  const stepFiles = useMemo(() => chunk ? chunkFiles(chunk) : [], [chunk]);
+  const activeFile = fileTab?.step === step && stepFiles.includes(fileTab.file) ? fileTab.file : stepFiles[0] ?? null;
   const changeSteps = useMemo(() => replayStepMap(replay?.chunks ?? []), [replay?.chunks]);
   const aiFindings = useMemo(() => sortFindings(aiReview?.findings ?? []), [aiReview]);
-  const go = (value: number) => {
+  const go = (value: number, file?: string) => {
     if (!replay) return;
-    setPlaying(false); setStep(Math.max(0, Math.min(replay.chunks.length - 1, value)));
+    const next = Math.max(0, Math.min(replay.chunks.length - 1, value));
+    setPlaying(false); setStep(next);
+    setFileTab(file ? { step: next, file } : null);
+    scrollRef.current?.scrollTo({ top: 0 });
+  };
+  const selectFileTab = (file: string) => {
+    setFileTab({ step, file });
     scrollRef.current?.scrollTo({ top: 0 });
   };
   const completeReview = () => {
@@ -1137,7 +1161,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     const anchor = findingAnchor(files, finding);
     if (!anchor) return;
     setShowFullDiff(anchor.changedIndex === null);
-    if (anchor.changedIndex !== null) go(changeSteps.get(anchor.changedIndex) ?? step);
+    if (anchor.changedIndex !== null) go(changeSteps.get(anchor.changedIndex) ?? step, anchor.path);
   };
 
   useEffect(() => {
@@ -1205,7 +1229,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
             <div className="timeline-title"><span>Reconstruction</span><em>{replay.chunks.length} steps</em></div>
             <ol ref={timelineRef}>
               {replay.chunks.map((item, index) => (
-                <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={`${item.file}-${item.start}`}>
+                <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={`${item.ranges[0].file}-${item.ranges[0].start}`}>
                   <button onClick={() => go(index)}>
                     <span className="step-marker">
                       {index < step ? <Check size={12} /> : index + 1}
@@ -1213,7 +1237,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                     </span>
                     <span>
                       <span className="step-title-row"><strong>{item.title}</strong>{item.impactful && <span className="impact-badge">High impact</span>}</span>
-                      <code>{item.file}</code>
+                      <code>{stepFilesLabel(item)}</code>
                     </span>
                   </button>
                 </li>
@@ -1235,7 +1259,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                 <div className="step-meta">
                   <span>Step {step + 1}</span>
                   {chunk.impactful && <span className="impact-label"><Star size={10} fill="currentColor" aria-hidden="true" />High impact</span>}
-                  <code>{chunk.file}</code>
+                  <code>{stepFilesLabel(chunk)}</code>
                 </div>
                 <div className="diff-scope-toggle" role="group" aria-label="Diff scope">
                   <button className={!showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(false)} aria-pressed={!showFullDiff}>This step</button>
@@ -1244,8 +1268,24 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
               </div>
               <h2>{chunk.title}</h2><p>{chunk.description}</p>
             </div>}
+            {chunk && !showFullDiff && stepFiles.length > 0 && (
+              <div className="file-tabs" role="tablist" aria-label="Files in this step">
+                {stepFiles.map((path) => {
+                  const lines = chunk.ranges.filter((range) => range.file === path).reduce((sum, range) => sum + range.end - range.start + 1, 0);
+                  const pending = comments.filter((comment) => comment.path === path).length;
+                  const slash = path.lastIndexOf("/");
+                  return (
+                    <button key={path} role="tab" aria-selected={path === activeFile} className={path === activeFile ? "active" : ""} onClick={() => selectFileTab(path)} title={path}>
+                      <code>{slash >= 0 && <span>{path.slice(0, slash + 1)}</span>}{path.slice(slash + 1)}</code>
+                      <em>{lines} {lines === 1 ? "line" : "lines"}</em>
+                      {pending > 0 && <span className="tab-pending"><MessageSquare size={10} />{pending}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <div className="diff-scroll" ref={scrollRef}>
-              {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRange={chunk ? { start: chunk.start, end: chunk.end } : null} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
+              {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
             </div>
           </section>
           <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
