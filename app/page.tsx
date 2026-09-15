@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { api, isApiErrorWithStatus } from "@/lib/api";
 import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap } from "@/lib/diff";
 import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
@@ -151,6 +152,7 @@ function AppHeader({
     <header className="app-header">
       <Brand />
       <div className="header-right">
+        <Link className="recording-home" href="/recordings">Open recording</Link>
         <span className="header-context">PRs, reconstructed</span>
         <button className="icon-button quiet theme-toggle" onClick={onToggleTheme} aria-label="Toggle color mode" title="Toggle color mode">
           <Moon className="moon-icon" size={15} /><Sun className="sun-icon" size={15} />
