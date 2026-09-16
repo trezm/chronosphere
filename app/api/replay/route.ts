@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { withoutRecordingDiff } from "@/lib/pr-recording";
 import { githubFetch, githubJson, githubToken, jsonError, parsePullNumber, parseRepo } from "@/lib/github";
 import { buildReplay, ReplayOutputError } from "@/lib/replay";
 import { OpenRouterError, type ReplayStreamEvent } from "@/lib/replay-stream";
@@ -52,7 +53,7 @@ export async function POST(request: NextRequest) {
       author: { login: pull.user.login, avatarUrl: pull.user.avatar_url },
       base: pull.base.ref,
       head: pull.head.ref,
-      diff: await diffResponse.text(),
+      diff: withoutRecordingDiff(await diffResponse.text()),
     } as Pick<PullRequestDetail, "number" | "title" | "body" | "author" | "base" | "head" | "diff">;
     // Request validation and the GitHub round trip stay plain JSON errors; once
     // the model call begins the client is reading a stream, so build failures

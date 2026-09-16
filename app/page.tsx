@@ -11,6 +11,7 @@ import {
   ChevronUp,
   CircleDot,
   ExternalLink,
+  FileUp,
   GitBranch,
   GitMerge,
   GitPullRequest,
@@ -35,6 +36,9 @@ import {
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { contentHash, parseRecording, RECORDING_MAX_BYTES, type RecordedChange, type Recording } from "@/lib/recording";
+import { historicalReviewNote, recordedChangeDiff, recordedLineAnchor, recordingReplay, type ReviewAnchor } from "@/lib/recording-review";
+import { PR_RECORDING_PATH } from "@/lib/pr-recording";
 import { api, isApiErrorWithStatus } from "@/lib/api";
 import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap } from "@/lib/diff";
 import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
@@ -406,7 +410,8 @@ function RepositoryPicker({
 
 /** How a step's files read in the timeline and narration: one path, or the basenames of several. */
 function stepFilesLabel(chunk: ReplayChunk): string {
-  const paths = chunkFiles(chunk);
+  const paths = chunk.files ?? chunkFiles(chunk);
+  if (!paths.length) return "Checkpoint";
   if (paths.length === 1) return paths[0];
   return paths.map((path) => path.slice(path.lastIndexOf("/") + 1)).join(", ");
 }
@@ -428,6 +433,10 @@ function ReplayFileView({
   onDelete,
   onGoToStep,
   hidden = false,
+  localContent,
+  resolveComment,
+  onHistoricalComment,
+  commentingDisabled = false,
 }: {
   file: DiffFile;
   step: number;
@@ -447,8 +456,12 @@ function ReplayFileView({
   onGoToStep: (step: number, file: string) => void;
   /** Keeps the view mounted, with its composer and expanded context, while another file's tab is active. */
   hidden?: boolean;
+  localContent?: string;
+  resolveComment?: (line: DiffLine) => ReviewAnchor | null;
+  onHistoricalComment?: (line: number, side: "LEFT" | "RIGHT", body: string) => void;
+  commentingDisabled?: boolean;
 }) {
-  const [target, setTarget] = useState<{ line: number; side: "LEFT" | "RIGHT"; index: number | null } | null>(null);
+  const [target, setTarget] = useState<{ path: string; line: number; side: "LEFT" | "RIGHT"; index: number | null; historical: boolean } | null>(null);
   const [body, setBody] = useState("");
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editedBody, setEditedBody] = useState("");
@@ -513,7 +526,7 @@ function ReplayFileView({
   const loadContent = async () => {
     if (contentLinesRef.current) return contentLinesRef.current;
     const query = new URLSearchParams({ repo: contentRepo, ref: contentRef, path: usesOldContent ? (file.oldPath ?? file.path) : file.path });
-    const { content } = await api<{ content: string }>(`/api/github/file?${query}`);
+    const { content } = localContent !== undefined ? { content: localContent } : await api<{ content: string }>(`/api/github/file?${query}`);
     const lines = content.replace(/\r\n/g, "\n").split("\n");
     if (lines.at(-1) === "") lines.pop();
     contentLinesRef.current = lines;
@@ -556,14 +569,19 @@ function ReplayFileView({
     });
   };
 
-  const commentTarget = (line: DiffLine) => ({
-    line: line.type === "delete" ? line.oldLine : line.newLine,
-    side: line.type === "delete" ? "LEFT" as const : "RIGHT" as const,
+  const commentTarget = (line: DiffLine) => {
+    const resolved = resolveComment?.(line);
+    return {
+    path: resolved?.path ?? file.path,
+    historical: !!resolveComment && !resolved,
+    line: resolved?.line ?? (line.type === "delete" ? line.oldLine : line.newLine),
+    side: resolved?.side ?? (line.type === "delete" ? "LEFT" as const : "RIGHT" as const),
     index: line.changedIndex,
-  });
+  }; };
   const submitComment = () => {
     if (!target?.line || !body.trim()) return;
-    onAdd({ path: file.path, line: target.line, side: target.side, body: body.trim(), step });
+    if (target.historical) onHistoricalComment?.(target.line, target.side, body.trim());
+    else onAdd({ path: target.path, line: target.line, side: target.side, body: body.trim(), step });
     setBody("");
     setTarget(null);
   };
@@ -608,15 +626,15 @@ function ReplayFileView({
               const startsFutureGroup = future && previousLineStep !== lineStep;
               const futureChunk = lineStep === undefined ? undefined : replayChunks[lineStep];
               const anchor = commentTarget(line);
-              const anchored = fileComments.filter((comment) => comment.line === anchor.line && comment.side === anchor.side);
-              const anchoredFindings = findingsAtNewLine(findings, file.path, line.newLine);
-              const composing = target?.line === anchor.line && target.side === anchor.side;
+              const anchored = anchor.historical ? [] : comments.filter((comment) => comment.path === anchor.path && comment.line === anchor.line && comment.side === anchor.side);
+              const anchoredFindings = anchor.historical ? [] : findingsAtNewLine(findings, anchor.path, anchor.side === "RIGHT" ? anchor.line : null);
+              const composing = target?.line === anchor.line && target.side === anchor.side && target.historical === anchor.historical;
               return (
                 <Fragment key={`${hunk.originalIndex}-${lineIndex}`}>
                   <div className={`diff-row ${line.type} ${current ? "current" : ""} ${past ? "past-change" : ""} ${future ? "future-change" : ""}`}>
                     {future
                       ? <span className="future-change-gutter" />
-                      : <button className="add-comment" onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`Comment on line ${anchor.line}`}><span>+</span></button>}
+                      : <button className="add-comment" disabled={commentingDisabled} title={anchor.historical ? "Add a historical-line note to the review summary" : `Comment on PR line ${anchor.line}`} onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`${anchor.historical ? "Note on historical" : "Comment on"} line ${anchor.line}`}><span>+</span></button>}
                     <span className="line-number">{line.oldLine ?? ""}</span>
                     <span className="line-number">{line.newLine ?? ""}</span>
                     {future ? (
@@ -668,8 +686,9 @@ function ReplayFileView({
                   ))}
                   {!future && composing && (
                     <div className="inline-composer">
+                      {target?.historical && <p className="historical-comment-hint">This line is from a historical version. Your note will be included in the review summary with its file and step.</p>}
                       <textarea autoFocus value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitComment(); } }} placeholder={`Leave a comment on ${file.path}:${anchor.line}`} />
-                      <div><button className="text-button" onClick={() => { setTarget(null); setBody(""); }}>Cancel</button><button className="primary-button compact" onClick={submitComment} disabled={!body.trim()}>Add pending comment</button></div>
+                      <div><button className="text-button" onClick={() => { setTarget(null); setBody(""); }}>Cancel</button><button className="primary-button compact" onClick={submitComment} disabled={!body.trim()}>{target?.historical ? "Add to review summary" : "Add pending comment"}</button></div>
                     </div>
                   )}
                 </Fragment>
@@ -683,6 +702,46 @@ function ReplayFileView({
       {contextError && <div className="context-error">{contextError}</div>}
     </article>
   );
+}
+
+function RecordedReviewFile({ change, canonical, pull, step, hidden, hashCache, ...actions }: {
+  change: RecordedChange; canonical?: DiffFile; pull: PullRequestDetail; step: number; hidden: boolean;
+  hashCache: Map<string, Promise<string>>;
+  comments: PendingComment[]; findings: ReviewFinding[];
+  onAdd: (comment: Omit<PendingComment, "id">) => void;
+  onAddFinding: (finding: ReviewFinding) => void;
+  onUpdate: (id: string, body: string) => void; onDelete: (id: string) => void;
+  onGoToStep: (step: number, file: string) => void;
+  onHistoricalComment: (line: number, side: "LEFT" | "RIGHT", body: string) => void;
+}) {
+  const file = useMemo(() => recordedChangeDiff(change), [change]);
+  const [verified, setVerified] = useState<{ baseHash?: string; headHash?: string } | null>(null);
+  const [verificationError, setVerificationError] = useState(false);
+  useEffect(() => {
+    if (hidden) return;
+    let active = true;
+    async function hash(repo: string, ref: string, path: string) {
+      const query = new URLSearchParams({ repo, ref, path }).toString();
+      if (!hashCache.has(query)) hashCache.set(query, api<{ content: string }>(`/api/github/file?${query}`).then(({ content }) => contentHash(content)).catch((error) => { hashCache.delete(query); throw error; }));
+      return hashCache.get(query)!;
+    }
+    const check = async () => {
+      if (!canonical) { if (active) setVerified({}); return; }
+      const results = await Promise.allSettled([
+        canonical.status !== "added" ? hash(pull.baseRepo, pull.baseSha, canonical.oldPath ?? canonical.path) : Promise.resolve(undefined),
+        canonical.status !== "deleted" ? hash(pull.headRepo, pull.headSha, canonical.path) : Promise.resolve(undefined),
+      ]);
+      if (!active) return;
+      setVerified({ baseHash: results[0].status === "fulfilled" ? results[0].value : undefined, headHash: results[1].status === "fulfilled" ? results[1].value : undefined });
+      setVerificationError(results.some((result) => result.status === "rejected"));
+    };
+    void check();
+    return () => { active = false; };
+  }, [canonical, hashCache, hidden, pull.baseRepo, pull.baseSha, pull.headRepo, pull.headSha]);
+  return <div hidden={hidden}>
+    {verificationError && <p className="recording-review-notice">PR line verification is unavailable for this file. Comments will be added to the review summary.</p>}
+    {!file.hunks.length ? <p className="recording-review-notice"><code>{change.path}</code>: {file.status}; no visible line changes (empty file or line-ending change).</p> : <ReplayFileView {...actions} file={file} step={step} currentRanges={[{ file: file.path, start: 1, end: file.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.changedIndex !== null).length }]} replayChunks={[]} changeSteps={new Map()} showFullDiff contentRepo="" contentRef="" localContent={change.after?.content ?? change.before?.content ?? ""} resolveComment={(line) => recordedLineAnchor(change, line, canonical, verified ?? {})} commentingDisabled={verified === null} />}
+  </div>;
 }
 
 function ReviewSidebar({
@@ -910,9 +969,18 @@ function buildStageLabel(stage: BuildStage, chars: number, model: string): strin
   return `Reconstructing — ${size} characters so far…`;
 }
 
-function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, onStepChange, onBack }: { repo: string; number: number; initialStep: number | null; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; onStepChange: (step: number) => void; onBack: () => void }) {
+type RecordingAttachment = { recording: Recording; name: string; headSha: string; origin: "upload" | "repository" };
+
+function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, aiAvailable, onStepChange, onBack }: { repo: string; number: number; initialStep: number | null; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; aiAvailable: boolean; onStepChange: (step: number) => void; onBack: () => void }) {
   const [pull, setPull] = useState<PullRequestDetail | null>(null);
   const [replay, setReplay] = useState<ReplayResult | null>(null);
+  const [attachment, setAttachment] = useState<RecordingAttachment | null>(null);
+  const [committedRecording, setCommittedRecording] = useState<RecordingAttachment | null>(null);
+  const [recordingBusy, setRecordingBusy] = useState(true);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
+  const recordingInputRef = useRef<HTMLInputElement>(null);
+  const [recordingHashCache] = useState(() => new Map<string, Promise<string>>());
+  const aiReplayRef = useRef<ReplayResult | null>(null);
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [comments, setComments] = useState<PendingComment[]>([]);
@@ -970,8 +1038,10 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           }
           catch { /* Browser privacy settings must not block review work. */ }
         }
+        if (!active) return;
         if (cached) {
           setReplay(upgradeReplay(cached.replay));
+          if (cached.replay.source !== "recording") aiReplayRef.current = upgradeReplay(cached.replay);
           const restored = bootStepRef.current === null ? cached.step : bootStepRef.current - 1;
           setStep(Math.max(0, Math.min(restored, cached.replay.chunks.length - 1)));
           setComments(cached.review?.comments ?? []);
@@ -983,16 +1053,54 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           setScoutModel(cached.scoutModel ?? cached.aiReview?.scoutModel ?? defaultScoutModel);
           setReviewerModel(cached.reviewerModel ?? cached.aiReview?.reviewerModel ?? defaultReviewerModel);
         }
+        if (!active) return;
         setStateReady(true);
+        setLoading(false);
+        try {
+          const result = await api<{ source: string | null; path: string; headSha: string }>(`/api/github/recording?${new URLSearchParams({ repo, number: String(number), headSha: pull.headSha })}`);
+          if (result.source !== null) {
+            const recording = await parseRecording(result.source);
+            if (!active) return;
+            const found: RecordingAttachment = { recording, name: result.path, origin: "repository", headSha: result.headSha };
+            setCommittedRecording(found);
+            if (!cached || cached.replay.recordingId === recording.session.id) {
+              setAttachment(found);
+              setReplay(recordingReplay(recording, found.name));
+              const restored = bootStepRef.current === null ? cached?.step ?? 0 : bootStepRef.current - 1;
+              setStep(Math.max(0, Math.min(restored, recording.events.length)));
+            }
+          }
+        } catch (error) {
+          if (active) setRecordingError(error instanceof Error ? error.message : "Could not load the committed recording.");
+        } finally { if (active) setRecordingBusy(false); }
       } catch (error) {
         if (active) setError(error instanceof Error ? error.message : "Could not load the pull request.");
       } finally {
-        if (active) setLoading(false);
+        if (active) { setLoading(false); setRecordingBusy(false); }
       }
     };
     void load();
     return () => { active = false; };
   }, [repo, number, cacheKey, defaultScoutModel, defaultReviewerModel]);
+
+  const selectRecording = (value: RecordingAttachment) => {
+    if (replay && replay.source !== "recording") aiReplayRef.current = replay;
+    setAttachment(value); setReplay(recordingReplay(value.recording, value.name));
+    setStep(0); setFileTab(null); setPlaying(false); setShowFullDiff(false); setRecordingError(null);
+  };
+  const importRecording = async (file?: File) => {
+    if (!file || !pull || recordingBusy) return;
+    setRecordingBusy(true); setRecordingError(null); setPlaying(false);
+    try {
+      if (file.size > RECORDING_MAX_BYTES) throw new Error("Choose a recording smaller than 20 MB.");
+      const recording = await parseRecording(await file.text());
+      selectRecording({ recording, name: file.name, headSha: pull.headSha, origin: "upload" });
+    } catch (error) { setRecordingError(error instanceof Error ? error.message : "Could not read this recording."); }
+    finally { setRecordingBusy(false); }
+  };
+  const selectAiSynopsis = () => {
+    setReplay(aiReplayRef.current); setStep(0); setFileTab(null); setPlaying(false); setShowFullDiff(false);
+  };
   useEffect(() => {
     // A rebuild briefly removes the replay from memory; retain the last complete
     // state until its replacement is ready.
@@ -1065,6 +1173,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   // helper cannot consume, so this request is made inline.
   const build = async () => {
     if (building) return;
+    if (!aiAvailable) { setError("Connect OpenRouter to build an AI synopsis."); return; }
     const controller = new AbortController();
     buildAbortRef.current = controller;
     setBuilding(true); setBuildStage("contacting"); setBuildChars(0); setBuildElapsed(0); setError(null);
@@ -1086,7 +1195,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         else built = event.replay;
       }
       if (!built) throw new Error("The replay stream ended before it finished.");
-      setReplay(built); setStep(0);
+      aiReplayRef.current = built; setReplay(built); setStep(0);
     } catch (error) {
       if (controller.signal.aborted) return;
       setError(error instanceof Error ? error.message : "Could not build replay.");
@@ -1099,8 +1208,11 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const cancelBuild = () => buildAbortRef.current?.abort();
 
   const files = useMemo(() => parseUnifiedDiff(pull?.diff ?? ""), [pull?.diff]);
+  const isRecorded = replay?.source === "recording";
+  const recording = isRecorded && attachment && attachment.recording.session.id === replay?.recordingId && attachment.headSha === pull?.headSha ? attachment.recording : null;
+  const recordedEvent = recording?.events[step - 1];
   const chunk = replay?.chunks[step] ?? null;
-  const stepFiles = useMemo(() => chunk ? chunkFiles(chunk) : [], [chunk]);
+  const stepFiles = useMemo(() => chunk ? chunk.files ?? chunkFiles(chunk) : [], [chunk]);
   const activeFile = fileTab?.step === step && stepFiles.includes(fileTab.file) ? fileTab.file : stepFiles[0] ?? null;
   const changeSteps = useMemo(() => replayStepMap(replay?.chunks ?? []), [replay?.chunks]);
   const aiFindings = useMemo(() => sortFindings(aiReview?.findings ?? []), [aiReview]);
@@ -1128,6 +1240,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   };
   const requestAiReview = async () => {
     if (!pull || aiReviewBusy) return;
+    if (!aiAvailable) { setAiReviewError("Connect OpenRouter to run an AI review."); return; }
     setAiReviewBusy(true);
     setAiReviewError(null);
     try {
@@ -1162,6 +1275,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const goToFinding = (finding: ReviewFinding) => {
     const anchor = findingAnchor(files, finding);
     if (!anchor) return;
+    if (isRecorded) { setShowFullDiff(true); return; }
     setShowFullDiff(anchor.changedIndex === null);
     if (anchor.changedIndex !== null) go(changeSteps.get(anchor.changedIndex) ?? step, anchor.path);
   };
@@ -1201,6 +1315,21 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         <div className="pr-identity"><span className="open-dot" /><strong>{pull.title}</strong><span>#{pull.number}</span></div>
         <div className="pr-stats"><span className="additions">+{pull.additions}</span><span className="deletions">−{pull.deletions}</span><span>{pull.changedFiles} files</span><a href={pull.url} target="_blank" rel="noreferrer">GitHub <ExternalLink size={12} /></a></div>
       </header>
+      <div className="replay-source-bar">
+        <div className="diff-scope-toggle" role="group" aria-label="Replay source">
+          <button className={!isRecorded ? "active" : ""} aria-pressed={!isRecorded} disabled={building || recordingBusy} onClick={selectAiSynopsis}>AI synopsis</button>
+          <button className={isRecorded ? "active" : ""} aria-pressed={isRecorded} disabled={building || recordingBusy || !(attachment ?? committedRecording)} onClick={() => { const value = attachment ?? committedRecording; if (value) selectRecording(value); }}>Recording</button>
+        </div>
+        <button className="secondary-button compact" disabled={building || recordingBusy} onClick={() => recordingInputRef.current?.click()}><FileUp size={14} />{recordingBusy ? "Checking recording…" : "Attach recording"}</button>
+        {committedRecording && attachment?.origin === "upload" && <button className="text-button" onClick={() => selectRecording(committedRecording)}>Use committed recording</button>}
+        <span>{isRecorded ? replay.recordingName : committedRecording ? "Recording found in this PR" : `Commit ${PR_RECORDING_PATH} or attach a file`}</span>
+        {!aiAvailable && <a href="/api/auth/openrouter">Connect OpenRouter for AI</a>}
+        <input ref={recordingInputRef} type="file" accept=".jsonl,application/x-ndjson" hidden aria-label="Attach recording to this PR" onChange={(event) => { void importRecording(event.target.files?.[0]); event.target.value = ""; }} />
+      </div>
+      {recordingError && <div className="error-banner" role="alert">{recordingError}</div>}
+      {isRecorded && <div className="recording-review-notice">
+        {recording ? <>Recorded checkpoints · {attachment?.origin === "repository" ? `From this PR at ${pull.headSha.slice(0, 8)}` : "Attached to this PR for this tab; reattach after refreshing"}. Matching PR lines receive inline comments; historical-line notes go into the review summary.</> : <>Reattach <strong>{replay.recordingName}</strong> to resume recorded playback. Your review is restored; the full PR diff is still available.</>}
+      </div>}
       {!replay ? (
         <section className="build-replay">
           <div className={`replay-illustration${building ? " building" : ""}`} aria-hidden="true">
@@ -1221,17 +1350,17 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
               <button type="button" className="text-button cancel-build" onClick={cancelBuild}>Cancel</button>
             </div>
           ) : (
-            <button className="primary-button build-button" onClick={build} disabled={!model.trim()}><Play size={15} fill="currentColor" />Build replay</button>
+            <button className="primary-button build-button" onClick={build} disabled={!model.trim() || !aiAvailable || recordingBusy}><Play size={15} fill="currentColor" />Build replay</button>
           )}
           <div className="pr-context"><Avatar src={pull.author.avatarUrl} alt="" size={22} /><span>Authored by <strong>@{pull.author.login}</strong></span><GitBranch size={13} /><code>{pull.head}</code><ArrowRight size={12} /><code>{pull.base}</code></div>
         </section>
       ) : (
         <div className="replay-grid">
           <aside className="timeline-panel">
-            <div className="timeline-title"><span>Reconstruction</span><em>{replay.chunks.length} steps</em></div>
+            <div className="timeline-title"><span>{isRecorded ? "Recorded checkpoints" : "Reconstruction"}</span><em>{replay.chunks.length} steps</em></div>
             <ol ref={timelineRef}>
               {replay.chunks.map((item, index) => (
-                <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={`${item.ranges[0].file}-${item.ranges[0].start}`}>
+                <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={index}>
                   <button onClick={() => go(index)}>
                     <span className="step-marker">
                       {index < step ? <Check size={12} /> : index + 1}
@@ -1245,7 +1374,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                 </li>
               ))}
             </ol>
-            <div className="timeline-model"><Sparkles size={13} /><span>Replayed by<br /><strong>{replay.model}</strong></span></div>
+            <div className="timeline-model"><Sparkles size={13} /><span>{isRecorded ? "Agent explanations" : "Replayed by"}<br /><strong>{replay.model}</strong></span></div>
           </aside>
           <section className="code-stage">
             <header className="player-bar">
@@ -1254,7 +1383,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
               <button className="icon-button" onClick={() => go(step + 1)} disabled={step === replay.chunks.length - 1} aria-label="Next replay step" aria-keyshortcuts="Meta+ArrowRight" title="Next step (⌘→)"><ChevronRight size={16} /></button>
               <input type="range" min={0} max={Math.max(0, replay.chunks.length - 1)} value={step} onChange={(e) => go(Number(e.target.value))} aria-label="Replay position" />
               <strong>{step + 1} <span>/ {replay.chunks.length}</span></strong>
-              <button className="rebuild-button" onClick={() => { setReplay(null); setPlaying(false); }}>Rebuild</button>
+              {!isRecorded && <button className="rebuild-button" onClick={() => { setReplay(null); setPlaying(false); }}>Rebuild</button>}
             </header>
             {chunk && <div className="step-narration">
               <div className="step-narration-top">
@@ -1279,7 +1408,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                   return (
                     <button key={path} role="tab" aria-selected={path === activeFile} className={path === activeFile ? "active" : ""} onClick={() => selectFileTab(path)} title={path}>
                       <code>{slash >= 0 && <span>{path.slice(0, slash + 1)}</span>}{path.slice(slash + 1)}</code>
-                      <em>{lines} {lines === 1 ? "line" : "lines"}</em>
+                      {!isRecorded && <em>{lines} {lines === 1 ? "line" : "lines"}</em>}
                       {pending > 0 && <span className="tab-pending"><MessageSquare size={10} />{pending}</span>}
                     </button>
                   );
@@ -1287,7 +1416,15 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
               </div>
             )}
             <div className="diff-scroll" ref={scrollRef}>
-              {files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
+              {isRecorded && !showFullDiff ? <>
+                {!recording ? <p className="recording-review-notice">Attach the original recording to see its file changes, or select Full PR to keep reviewing.</p> : <>
+                  {step === 0 && <p className="recording-review-notice">Starting snapshot · scope: {recording.session.scope.join(", ")}. Select the next step to review the first changes.</p>}
+                  {(recordedEvent?.omitted ?? recording.session.omitted).length > 0 && <details className="recording-review-evidence"><summary>Omitted files at this checkpoint</summary><ul>{(recordedEvent?.omitted ?? recording.session.omitted).map((entry) => <li key={entry.path}><code>{entry.path}</code> — {entry.reason}</li>)}</ul></details>}
+                  {recordedEvent?.command && <details className="recording-review-evidence" open><summary>Command result · {recordedEvent.command.exitCode === 0 ? "Passed" : "Failed"}{recordedEvent.command.signal ? ` (${recordedEvent.command.signal})` : ""}</summary><pre>{recordedEvent.command.argv.map((arg) => JSON.stringify(arg)).join(" ")}</pre><pre>{recordedEvent.command.output || "(no output)"}</pre>{recordedEvent.command.truncated && <p>Output truncated by the recorder.</p>}</details>}
+                  {recordedEvent && !recordedEvent.changes.length && <p className="recording-review-notice">No file changes at this checkpoint. You can add a note in the review summary or review the full PR.</p>}
+                  {recordedEvent?.changes.map((change) => <RecordedReviewFile key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} hashCache={recordingHashCache} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
+                </>}
+              </> : files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
             </div>
           </section>
           <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
@@ -1344,11 +1481,11 @@ export default function Home() {
     } : current);
   }, []);
   if (!auth) return <main className="loading-screen"><span className="spinner large" /><strong>Opening Chronosphere</strong></main>;
-  const ready = auth.github.connected && auth.openrouter.connected && auth.github.user;
+  const ready = auth.github.connected && auth.github.user;
   return (
     <div className="app-frame">
       <AppHeader auth={auth} onToggleTheme={toggleTheme} onLogout={logout} />
-      {!ready ? <ConnectionGate auth={auth} connectionError={connectionError} /> : route.repo && route.pull ? <ReplayWorkspace key={`${route.repo}#${route.pull}`} repo={route.repo} number={route.pull} initialStep={route.step} defaultModel={auth.defaults.model} defaultScoutModel={auth.defaults.scoutModel} defaultReviewerModel={auth.defaults.reviewerModel} viewer={auth.github.user!.login} onStepChange={syncStep} onBack={closePull} /> : <RepositoryPicker viewer={auth.github.user!} selectedRepo={route.repo} onSelectRepo={selectRepo} onOpen={openPull} onReconnectRequired={requireGithubReconnect} />}
+      {!ready ? <ConnectionGate auth={auth} connectionError={connectionError} /> : route.repo && route.pull ? <ReplayWorkspace key={`${route.repo}#${route.pull}`} repo={route.repo} number={route.pull} initialStep={route.step} defaultModel={auth.defaults.model} defaultScoutModel={auth.defaults.scoutModel} defaultReviewerModel={auth.defaults.reviewerModel} viewer={auth.github.user!.login} aiAvailable={auth.openrouter.connected} onStepChange={syncStep} onBack={closePull} /> : <RepositoryPicker viewer={auth.github.user!} selectedRepo={route.repo} onSelectRepo={selectRepo} onOpen={openPull} onReconnectRequired={requireGithubReconnect} />}
     </div>
   );
 }

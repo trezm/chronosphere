@@ -161,3 +161,22 @@ test("a previously captured file that becomes ignored is omitted without reading
   assert.deepEqual(log.events[0].omitted, [{ path: "local.txt", reason: "Now ignored by Git" }]);
   assert.equal((await readFile(f.session, "utf8")).includes("private version"), false);
 });
+
+test("PR export includes only a finished portable log and supports replacing the exported artifact", async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.repo, "app.js"), "before\n");
+  f.start();
+  const pending = f.run("export", "--session", f.session);
+  assert.equal(pending.status, 1);
+  assert.match(pending.stderr, /Finish the session/);
+  await writeFile(join(f.repo, "app.js"), "after\n");
+  f.okay("finish", "--session", f.session, "--title", "Done", "--reason", "Ready for review");
+  f.okay("export", "--session", f.session);
+  const artifact = join(f.repo, ".chronosphere", "replay.jsonl");
+  assert.equal(await readFile(artifact, "utf8"), await readFile(f.session, "utf8"));
+  await assert.rejects(readFile(`${artifact}.local.json`), /ENOENT/);
+  await writeFile(artifact, "old artifact");
+  f.okay("export", "--session", f.session);
+  assert.equal((await parseRecording(await readFile(artifact, "utf8"))).events[0].type, "finish");
+  assert.equal(f.run("export", "--session", f.session, "--out", f.session).status, 1);
+});

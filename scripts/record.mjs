@@ -1,5 +1,5 @@
 #!/usr/bin/env -S node --experimental-strip-types
-import { open, readFile, mkdir, lstat, realpath, unlink } from "node:fs/promises";
+import { open, readFile, mkdir, lstat, realpath, unlink, rename } from "node:fs/promises";
 import { spawn, execFileSync } from "node:child_process";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -12,12 +12,14 @@ const HELP = `Chronosphere local recorder (Node 22.13+; use --experimental-strip
   run --session FILE --title 'Check' --reason 'Why' -- COMMAND [ARGS...]
   finish --session FILE --title 'Done' --reason 'Outcome'
   inspect --session FILE
+  export --session FILE [--out FILE]
 
 Paths in --include are literal repository-relative files or directories; default: .
 The default log is .chronosphere/recordings/<session-id>.jsonl (keep it local).
 Checkpoints observe current text files, not every intermediate edit. 'run' records
 the command result and any file changes, and returns the command's exit status.
 Binary, symlink, sensitive-name, and >256 KB files are omitted. No uploads.
+Export copies a finished recording to .chronosphere/replay.jsonl for a PR.
 `;
 
 function args(argv) {
@@ -121,7 +123,7 @@ async function execute(argv, cwd) {
 export async function main(argv) {
   if (!argv.length || argv[0] === "--help") { console.log(HELP); return 0; }
   const { operation, options } = args([...argv]);
-  if (!["start", "checkpoint", "run", "finish", "inspect"].includes(operation)) throw new Error(`Unknown operation: ${operation}`);
+  if (!["start", "checkpoint", "run", "finish", "inspect", "export"].includes(operation)) throw new Error(`Unknown operation: ${operation}`);
   if (operation === "start") {
     const repo = await realpath(git(resolve(options.repo ?? "."), "rev-parse", "--show-toplevel"));
     const scope = (options.include.length ? options.include : ["."]).map(validScope);
@@ -143,6 +145,25 @@ export async function main(argv) {
     return 0;
   }
   const destination = resolve(text(options.session, "--session"));
+  if (operation === "export") {
+    const source = await readFile(destination, "utf8");
+    const recording = await parseRecording(source);
+    if (recording.events.at(-1)?.type !== "finish") throw new Error("Finish the session before exporting a recording for a PR.");
+    let output;
+    if (options.out) output = resolve(options.out);
+    else {
+      const locator = JSON.parse(await readFile(`${destination}.local.json`, "utf8"));
+      if (locator.sessionId !== recording.session.id) throw new Error("Local locator belongs to a different session.");
+      output = resolve(locator.repo, ".chronosphere/replay.jsonl");
+    }
+    if (output === destination || output === `${destination}.local.json`) throw new Error("Export must not overwrite the original session or its local locator.");
+    await mkdir(dirname(output), { recursive: true, mode: 0o700 });
+    const temporary = `${output}.${randomUUID()}.tmp`;
+    try { await durableWrite(temporary, source, "wx"); await rename(temporary, output); }
+    finally { await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
+    console.log(`Exported recording for your PR:\n${output}\nCommit only the exported .jsonl; keep raw sessions and .local.json files local.`);
+    return 0;
+  }
   if (operation === "inspect") {
     const recording = await parseRecording(await readFile(destination, "utf8"));
     console.log(JSON.stringify({ title: recording.session.title, events: recording.events.length, files: recordingStateAt(recording, recording.events.length).size, finished: recording.events.at(-1)?.type === "finish" }, null, 2));

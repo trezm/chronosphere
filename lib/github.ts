@@ -3,6 +3,11 @@ import { readSession } from "./session";
 
 const API = "https://api.github.com";
 
+export class GitHubError extends Error {
+  status: number;
+  constructor(message: string, status: number) { super(message); this.status = status; }
+}
+
 export async function githubToken(request: NextRequest): Promise<string> {
   const session = await readSession(request);
   if (!session.github?.accessToken) throw new Error("GitHub authentication is required.");
@@ -33,7 +38,7 @@ export async function githubFetch(
     } catch {
       // Keep the status line for non-JSON failures.
     }
-    throw new Error(`GitHub: ${message}`);
+    throw new GitHubError(`GitHub: ${message}`, response.status);
   }
   return response;
 }

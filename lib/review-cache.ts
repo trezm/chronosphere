@@ -44,13 +44,14 @@ function isReplayRange(value: unknown): value is ReplayRange {
 /** The single-range step shape stored before steps could span files. */
 type LegacyReplayChunk = Omit<ReplayChunk, "ranges"> & ReplayRange;
 
-function isReplayChunk(value: unknown): value is ReplayChunk | LegacyReplayChunk {
+function isReplayChunk(value: unknown, recorded = false): value is ReplayChunk | LegacyReplayChunk {
   if (!value || typeof value !== "object") return false;
   const chunk = value as Partial<ReplayChunk> & Partial<ReplayRange>;
   const coverage = Array.isArray(chunk.ranges)
-    ? chunk.ranges.length > 0 && chunk.ranges.every(isReplayRange)
+    ? (recorded || chunk.ranges.length > 0) && chunk.ranges.every(isReplayRange)
     : isReplayRange(chunk);
   return coverage
+    && (chunk.files === undefined || (Array.isArray(chunk.files) && chunk.files.every((file) => typeof file === "string")))
     && typeof chunk.title === "string"
     && typeof chunk.description === "string"
     && (chunk.impactful === undefined || typeof chunk.impactful === "boolean");
@@ -61,10 +62,11 @@ export function isReplay(value: unknown): value is ReplayResult {
   if (!value || typeof value !== "object") return false;
   const replay = value as Partial<ReplayResult>;
   return typeof replay.model === "string"
+    && (replay.source === undefined || (replay.source === "recording" && typeof replay.recordingId === "string" && typeof replay.recordingName === "string"))
     && typeof replay.truncated === "boolean"
     && Array.isArray(replay.chunks)
     && replay.chunks.length > 0
-    && replay.chunks.every(isReplayChunk);
+    && replay.chunks.every((chunk) => isReplayChunk(chunk, replay.source === "recording"));
 }
 
 /** Rewrites legacy single-range steps into the current multi-range shape. */

@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { withoutRecordingDiff } from "@/lib/pr-recording";
 import { buildAiReview } from "@/lib/ai-review";
 import { defaultReviewerModel, defaultScoutModel } from "@/lib/config";
 import { githubFetch, githubJson, githubToken, jsonError, parsePullNumber, parseRepo } from "@/lib/github";
@@ -46,7 +47,7 @@ export async function POST(request: NextRequest) {
       author: { login: pull.user.login, avatarUrl: pull.user.avatar_url },
       base: pull.base.ref,
       head: pull.head.ref,
-      diff: await diffResponse.text(),
+      diff: withoutRecordingDiff(await diffResponse.text()),
     } as Pick<PullRequestDetail, "number" | "title" | "body" | "author" | "base" | "head" | "diff">;
     const review = await buildAiReview({
       repo: fullName,
