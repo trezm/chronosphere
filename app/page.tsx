@@ -39,7 +39,7 @@ import Link from "next/link";
 import { contentHash, parseRecording, RECORDING_MAX_BYTES, type RecordedChange, type Recording } from "@/lib/recording";
 import { historicalReviewNote, recordedChangeDiff, recordedLineAnchor, recordingReplay, type ReviewAnchor } from "@/lib/recording-review";
 import { PR_RECORDING_PATH } from "@/lib/pr-recording";
-import { api, isApiErrorWithStatus } from "@/lib/api";
+import { api, authorizedFetch, onGithubSessionExpired } from "@/lib/api";
 import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap } from "@/lib/diff";
 import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
 import { readReplayEvents } from "@/lib/replay-stream";
@@ -69,7 +69,7 @@ import type {
 } from "@/lib/types";
 
 type AuthState = {
-  github: { connected: boolean; user: { login: string; name: string | null; avatarUrl: string } | null };
+  github: { connected: boolean; user: { login: string; name: string | null; avatarUrl: string } | null; expired?: boolean };
   openrouter: { connected: boolean; userId: string | null };
   configured: { github: boolean };
   defaults: { model: string; scoutModel: string; reviewerModel: string };
@@ -78,6 +78,10 @@ type AuthState = {
 type Route = { repo: string | null; pull: number | null; step: number | null };
 
 const EMPTY_ROUTE: Route = { repo: null, pull: null, step: null };
+
+/** A tab hidden at least this long re-checks the GitHub session when it comes back, before any request can fail. */
+const SESSION_RECHECK_AFTER_MS = 5 * 60 * 1000;
+const SESSION_EXPIRED_MESSAGE = "Your GitHub session expired and could not be refreshed. Reconnect GitHub to continue.";
 
 function positiveInteger(value: string | null): number | null {
   const parsed = Number(value);
@@ -253,13 +257,11 @@ function RepositoryPicker({
   selectedRepo,
   onSelectRepo,
   onOpen,
-  onReconnectRequired,
 }: {
   viewer: NonNullable<AuthState["github"]["user"]>;
   selectedRepo: string | null;
   onSelectRepo: (repo: string, mode: "push" | "replace") => void;
   onOpen: (repo: string, pull: number) => void;
-  onReconnectRequired: () => void;
 }) {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [recentRepos, setRecentRepos] = useState<Set<string>>(() => new Set());
@@ -281,15 +283,11 @@ function RepositoryPicker({
         setRepositories(orderByRecency(repositories, recency));
         setRecentRepos(new Set(Object.keys(recency)));
       })
-      .catch((error: unknown) => {
-        if (isApiErrorWithStatus(error, 400, 401)) {
-          onReconnectRequired();
-          return;
-        }
-        setError(error instanceof Error ? error.message : "Could not load repositories.");
-      })
+      // A rejected session is handled by the app frame, which swaps in the
+      // connect page; the message here only matters while the picker is shown.
+      .catch((error: unknown) => setError(error instanceof Error ? error.message : "Could not load repositories."))
       .finally(() => setLoadingRepos(false));
-  }, [onReconnectRequired]);
+  }, []);
 
   // The first repository is a default rather than a navigation, so it replaces
   // the current history entry instead of adding one.
@@ -1178,7 +1176,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     buildAbortRef.current = controller;
     setBuilding(true); setBuildStage("contacting"); setBuildChars(0); setBuildElapsed(0); setError(null);
     try {
-      const response = await fetch("/api/replay", {
+      const response = await authorizedFetch("/api/replay", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo, number, model }),
         signal: controller.signal,
@@ -1441,7 +1439,10 @@ export default function Home() {
   const routeRef = useRef(route);
 
   useEffect(() => {
-    api<AuthState>("/api/auth/session").then(setAuth).catch(() => setAuth({ github: { connected: false, user: null }, openrouter: { connected: false, userId: null }, configured: { github: false }, defaults: { model: "openai/gpt-5-mini", scoutModel: "openai/gpt-5-mini", reviewerModel: "openai/gpt-5-mini" } }));
+    api<AuthState>("/api/auth/session").then((state) => {
+      if (state.github.expired) setConnectionError(SESSION_EXPIRED_MESSAGE);
+      setAuth(state);
+    }).catch(() => setAuth({ github: { connected: false, user: null }, openrouter: { connected: false, userId: null }, configured: { github: false }, defaults: { model: "openai/gpt-5-mini", scoutModel: "openai/gpt-5-mini", reviewerModel: "openai/gpt-5-mini" } }));
   }, []);
   useEffect(() => {
     const restore = () => {
@@ -1474,18 +1475,38 @@ export default function Home() {
     window.location.href = "/";
   };
   const requireGithubReconnect = useCallback(() => {
-    setConnectionError("Your GitHub credentials are no longer valid. Reconnect GitHub to continue.");
+    setConnectionError(SESSION_EXPIRED_MESSAGE);
     setAuth((current) => current ? {
       ...current,
-      github: { connected: false, user: null },
+      github: { connected: false, user: null, expired: true },
     } : current);
   }, []);
+  // Any request whose 401 survived a session refresh lands here, whichever
+  // screen made it.
+  useEffect(() => onGithubSessionExpired(requireGithubReconnect), [requireGithubReconnect]);
+  // A tab left open overnight re-checks (and refreshes) the session when it
+  // regains focus, so the first click after a break does not hit a dead token.
+  const githubConnected = auth?.github.connected ?? false;
+  useEffect(() => {
+    if (!githubConnected) return;
+    let hiddenAt: number | null = null;
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") { hiddenAt = Date.now(); return; }
+      if (hiddenAt === null || Date.now() - hiddenAt < SESSION_RECHECK_AFTER_MS) return;
+      hiddenAt = null;
+      api<AuthState>("/api/auth/session")
+        .then((state) => { if (!state.github.connected) requireGithubReconnect(); })
+        .catch(() => { /* A failed check changes nothing; the next request recovers on its own. */ });
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [githubConnected, requireGithubReconnect]);
   if (!auth) return <main className="loading-screen"><span className="spinner large" /><strong>Opening Chronosphere</strong></main>;
   const ready = auth.github.connected && auth.github.user;
   return (
     <div className="app-frame">
       <AppHeader auth={auth} onToggleTheme={toggleTheme} onLogout={logout} />
-      {!ready ? <ConnectionGate auth={auth} connectionError={connectionError} /> : route.repo && route.pull ? <ReplayWorkspace key={`${route.repo}#${route.pull}`} repo={route.repo} number={route.pull} initialStep={route.step} defaultModel={auth.defaults.model} defaultScoutModel={auth.defaults.scoutModel} defaultReviewerModel={auth.defaults.reviewerModel} viewer={auth.github.user!.login} aiAvailable={auth.openrouter.connected} onStepChange={syncStep} onBack={closePull} /> : <RepositoryPicker viewer={auth.github.user!} selectedRepo={route.repo} onSelectRepo={selectRepo} onOpen={openPull} onReconnectRequired={requireGithubReconnect} />}
+      {!ready ? <ConnectionGate auth={auth} connectionError={connectionError} /> : route.repo && route.pull ? <ReplayWorkspace key={`${route.repo}#${route.pull}`} repo={route.repo} number={route.pull} initialStep={route.step} defaultModel={auth.defaults.model} defaultScoutModel={auth.defaults.scoutModel} defaultReviewerModel={auth.defaults.reviewerModel} viewer={auth.github.user!.login} aiAvailable={auth.openrouter.connected} onStepChange={syncStep} onBack={closePull} /> : <RepositoryPicker viewer={auth.github.user!} selectedRepo={route.repo} onSelectRepo={selectRepo} onOpen={openPull} />}
     </div>
   );
 }
