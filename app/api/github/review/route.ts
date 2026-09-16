@@ -15,6 +15,9 @@ export async function POST(request: NextRequest) {
     const { fullName } = parseRepo(body.repo ?? null);
     const number = parsePullNumber(body.number);
     if (!['COMMENT', 'APPROVE', 'REQUEST_CHANGES'].includes(body.event ?? '')) throw new Error("Choose a valid review action.");
+    if (!body.commitId || !/^[a-f0-9]{40}$/i.test(body.commitId)) throw new Error("A valid reviewed commit SHA is required.");
+    const pull = await githubJson<{ head: { sha: string } }>(token, `/repos/${fullName}/pulls/${number}`);
+    if (pull.head.sha !== body.commitId) return Response.json({ error: "This PR changed since you opened it. Reopen the PR before submitting your review." }, { status: 409 });
     const comments = (body.comments ?? []).map((comment) => {
       if (!comment.path || !Number.isInteger(comment.line) || !['LEFT', 'RIGHT'].includes(comment.side ?? '') || !comment.body?.trim()) {
         throw new Error("Every pending comment needs a valid diff line and message.");

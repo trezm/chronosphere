@@ -2,12 +2,12 @@
 
 Chronosphere reconstructs a pull request into a plausible, step-by-step implementation story. Reviewers can scrub through the replay, stage inline comments at any step, submit a single GitHub review, and merge when the pull request is ready.
 
-PR replay is explicitly a model-generated reconstruction, not recorded history. A separate local recording experiment captures ordered workspace checkpoints with explanations and command results.
+PR replay can use an AI reconstruction or recorded workspace checkpoints with explanations and command results. Both use the same timeline, diff views, and GitHub review sidebar; the source is labelled explicitly.
 
 ## What is included
 
 - Required GitHub OAuth with PKCE
-- Required OpenRouter OAuth with PKCE
+- OpenRouter OAuth with PKCE for AI reconstruction and AI review (optional for recorded playback)
 - Repository picker and searchable open pull request list
 - Involvement filters for authored, assigned, and review-requested PRs
 - Author, assignee, and requested-reviewer context
@@ -23,6 +23,24 @@ PR replay is explicitly a model-generated reconstruction, not recorded history. 
 - Mergeability and conflict status
 - Railway build, start, and health-check configuration
 - Local JSONL recorder and browser-only recording playback at `/recordings`
+- PR-associated recordings from `.chronosphere/replay.jsonl` or a manual attachment, with inline review comments and historical-step notes
+
+## Review a recording with a PR
+
+Open a pull request in Chronosphere. The replay source bar lets you switch between **AI synopsis** and **Recording**, or **Attach recording** from a local `.jsonl` file. Recorded steps use the same timeline, file tabs, syntax-highlighted diffs, pending comments, review submission, and merge controls as reconstructed steps. GitHub sign-in is required; OpenRouter is only needed for AI features.
+
+To share the recording with the PR, finish the session and export it:
+
+```sh
+npm run record -- export --session /absolute/path/to/session.jsonl
+git add .chronosphere/replay.jsonl
+```
+
+Commit the exported file with your code changes. Chronosphere looks for exactly `.chronosphere/replay.jsonl` at the selected PR's head commit, including forked PRs. The exporter replaces that artifact when run again and copies only the validated, finished JSONL, never the local working-copy locator. This repository's ignore rules keep raw sessions private while allowing the exported artifact. In other repositories using a blanket `.chronosphere/` ignore, use `/.chronosphere/*` plus `!/.chronosphere/replay.jsonl` instead. The recorder excludes `.chronosphere` from capture, and the log is excluded from code reconstruction and AI review input.
+
+A manually attached file is associated with the selected PR/head for the current tab. Its source contents stay in browser memory; reattach after refreshing. The timeline metadata, current step, inline comments, and review summary use the existing per-user PR draft storage. A committed recording reloads from GitHub. Switching sources preserves pending comments and the review summary.
+
+Inline comments are anchored only when the recorded whole-file version matches the verified PR base/head file and the line is present in GitHub's diff. Comments on earlier or discarded versions go into the review summary with their file, line, event, and step instead of being attached to an incorrect GitHub line. **Full PR** always shows the current authoritative diff. Review submission rejects a PR head that changed after opening it.
 
 ## Local recording experiment
 
@@ -49,9 +67,9 @@ npm run record -- finish --session SESSION.jsonl \
   --title 'Finish validation work' --reason 'The implementation and checks are complete.'
 ```
 
-Use the project skill [`chronosphere-record`](.agents/skills/chronosphere-record/SKILL.md) to have a coding agent follow this workflow. The recorder can target another Git working copy with `node --experimental-strip-types /path/to/chronosphere/scripts/record.mjs start --repo /path/to/repo ...`. Subsequent commands find that working copy through the session's local companion file. The type-stripping flag enables the shared TypeScript format validator on older Node 22 releases; `npm run record` includes it automatically.
+Use the [`chronosphere-record` skill](SKILL.md) to have a coding agent follow this workflow. The recorder can target another Git working copy with `node --experimental-strip-types /path/to/chronosphere/scripts/record.mjs start --repo /path/to/repo ...`. Subsequent commands find that working copy through the session's local companion file. The type-stripping flag enables the shared TypeScript format validator on older Node 22 releases; `npm run record` includes it automatically.
 
-**Where the record lives.** Sessions default to `.chronosphere/recordings/<id>.jsonl`, ignored by this repository. When targeting another repository, add `.chronosphere/` to its ignore rules or use `--out` with a location outside that repository. Files are created with owner-only permissions. The `.jsonl` is a self-contained replay artifact; its `.local.json` companion contains an absolute working-copy path and is only needed to continue recording. Import reads the artifact into browser memory. Refreshing the tab clears it. There is no upload, database persistence, automatic sharing, or PR attachment in this experiment.
+**Where the record lives.** Sessions default to `.chronosphere/recordings/<id>.jsonl`, ignored by this repository. When targeting another repository, add `.chronosphere/` to its ignore rules or use `--out` with a location outside that repository. Files are created with owner-only permissions. The `.jsonl` is a self-contained replay artifact; its `.local.json` companion contains an absolute working-copy path and is only needed to continue recording. Import reads the artifact into browser memory. Refreshing the tab clears it. PR association is described above; the standalone viewer does not store or upload source snapshots.
 
 **What it captures.** The first line contains the current text snapshot (including existing uncommitted changes), repository name/branch/base commit, and selected scope. Subsequent lines contain sequence numbers, stable event IDs, timestamps, titles, explanations, and reversible file replacements with SHA-256 hashes. Command events include arguments, exit status or signal, and up to 32,000 characters of combined output. Capture a checkpoint after each coherent edit and before running a check; `run` refuses pending unrecorded changes so they cannot be attributed to the command. Renames appear as deletion plus addition. `finish` captures remaining edits and closes the session.
 
@@ -59,7 +77,7 @@ Use the project skill [`chronosphere-record`](.agents/skills/chronosphere-record
 
 The recorder selects Git-tracked and non-ignored untracked UTF-8 text files. It skips common credential names, symlinks, binary files, and files larger than 256 KB; the log lists omissions within the selected scope. Git-ignored untracked files are not read. A previously recorded file that becomes ignored or unreadable stays at its last captured text and is marked omitted, rather than being misrepresented as deleted. Initial/current readable snapshots are limited to 8 MB and 5,000 files; sessions to 20 MB and 2,000 events. These are bounded experimental limits. Source text and command output may contain sensitive material even with filename exclusions; inspect the artifact before choosing to share it.
 
-The viewer checks content hashes, contiguous event order, unique IDs, and each patch's prior state before loading. It supports playback, arbitrary scrubbing, before/after files, complete captured workspace states, and command evidence. Existing reconstructed PR replay remains separate: a future integration can associate a recording with a PR while preserving the distinction between recorded and reconstructed steps.
+The viewer checks content hashes, contiguous event order, unique IDs, and each patch's prior state before loading. It supports playback, arbitrary scrubbing, before/after files, complete captured workspace states, and command evidence. For GitHub comments, use the PR workspace and attach the same recording; the standalone viewer remains available for local inspection.
 
 ## Local setup
 

@@ -83,12 +83,17 @@ export interface ReplayRange {
  */
 export interface ReplayChunk {
   ranges: ReplayRange[];
+  /** Recorded checkpoints may touch files absent from the final PR diff. */
+  files?: string[];
   title: string;
   description: string;
   impactful?: boolean;
 }
 
 export interface ReplayResult {
+  source?: "recording";
+  recordingId?: string;
+  recordingName?: string;
   model: string;
   chunks: ReplayChunk[];
   truncated: boolean;

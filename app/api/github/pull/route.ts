@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { githubFetch, githubJson, githubToken, jsonError, parsePullNumber, parseRepo } from "@/lib/github";
 import type { PullRequestDetail } from "@/lib/types";
+import { withoutRecordingDiff } from "@/lib/pr-recording";
 
 interface GitHubPullDetail {
   number: number;
@@ -73,7 +74,7 @@ export async function GET(request: NextRequest) {
       deletions: pull.deletions,
       changedFiles: pull.changed_files,
       allowedMergeMethods,
-      diff: await diffResponse.text(),
+      diff: withoutRecordingDiff(await diffResponse.text()),
     };
     return Response.json({ pull: detail });
   } catch (error) {
