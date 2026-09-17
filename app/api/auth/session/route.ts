@@ -1,20 +1,26 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { defaultOpenRouterModel, defaultReviewerModel, defaultScoutModel } from "@/lib/config";
-import { readSession } from "@/lib/session";
+import { ensureGithubSession } from "@/lib/github-auth";
+import { readSession, writeSession } from "@/lib/session";
 
 export async function GET(request: NextRequest) {
   const session = await readSession(request);
-  return Response.json({
-    github: session.github
+  const check = await ensureGithubSession(session.github, {
+    clientId: process.env.GITHUB_CLIENT_ID,
+    clientSecret: process.env.GITHUB_CLIENT_SECRET,
+  });
+  const github = check.github;
+  const response = NextResponse.json({
+    github: github
       ? {
           connected: true,
           user: {
-            login: session.github.login,
-            name: session.github.name,
-            avatarUrl: session.github.avatarUrl,
+            login: github.login,
+            name: github.name,
+            avatarUrl: github.avatarUrl,
           },
         }
-      : { connected: false, user: null },
+      : { connected: false, user: null, expired: check.status === "expired" },
     openrouter: {
       connected: Boolean(session.openrouter?.apiKey),
       userId: session.openrouter?.userId ?? null,
@@ -27,5 +33,9 @@ export async function GET(request: NextRequest) {
       scoutModel: defaultScoutModel(),
       reviewerModel: defaultReviewerModel(),
     },
-  });
+  }, { headers: { "Cache-Control": "no-store" } });
+  // A refreshed token or a rejected one both change the cookie; an unchanged
+  // session is left alone so the check itself never extends its lifetime.
+  if (check.changed) await writeSession(request, response, { ...session, github });
+  return response;
 }

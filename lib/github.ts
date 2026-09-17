@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { isExpired } from "./github-auth";
 import { readSession } from "./session";
 
 const API = "https://api.github.com";
@@ -10,7 +11,9 @@ export class GitHubError extends Error {
 
 export async function githubToken(request: NextRequest): Promise<string> {
   const session = await readSession(request);
-  if (!session.github?.accessToken) throw new Error("GitHub authentication is required.");
+  // An expired token answers 401 here instead of at GitHub, so the client can
+  // refresh the session and retry without a doomed round trip.
+  if (!session.github?.accessToken || isExpired(session.github, Date.now())) throw new Error("GitHub authentication is required.");
   return session.github.accessToken;
 }
 
@@ -81,6 +84,6 @@ export function parsePullNumber(value: unknown): number {
 
 export function jsonError(error: unknown, status = 400): Response {
   const message = error instanceof Error ? error.message : "Something went wrong.";
-  const auth = /authentication is required/i.test(message);
+  const auth = /authentication is required/i.test(message) || (error instanceof GitHubError && error.status === 401);
   return Response.json({ error: message }, { status: auth ? 401 : status });
 }
