@@ -206,6 +206,8 @@ export async function main(argv) {
   } finally { await handle.close(); await unlink(lock); }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// Node resolves module URLs through symlinks, but preserves the CLI argument.
+const entryPath = process.argv[1] ? await realpath(process.argv[1]).catch(() => null) : null;
+if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

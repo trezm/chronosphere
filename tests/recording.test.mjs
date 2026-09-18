@@ -8,6 +8,15 @@ import { contentHash, parseRecording, recordingStateAt } from "../lib/recording.
 import { decompressRecording } from "../lib/recording-transport.ts";
 
 const recorder = resolve("scripts/record.mjs");
+test("the recorder runs when its installed directory is reached through a symlink", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "chronosphere-skill-link-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const alias = join(parent, "skill");
+  await symlink(resolve("."), alias, "dir");
+  const result = spawnSync(process.execPath, ["--experimental-strip-types", join(alias, "scripts/record.mjs"), "--help"], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /export --session/);
+});
 async function fixture(t) {
   const repo = await mkdtemp(join(tmpdir(), "chronosphere-test-"));
   t.after(() => rm(repo, { recursive: true, force: true }));
