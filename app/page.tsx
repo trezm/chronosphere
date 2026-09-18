@@ -967,13 +967,13 @@ function buildStageLabel(stage: BuildStage, chars: number, model: string): strin
   return `Reconstructing — ${size} characters so far…`;
 }
 
-type RecordingAttachment = { recording: Recording; name: string; headSha: string; origin: "upload" | "repository" };
+type RecordingAttachment = { recording: Recording; name: string; headSha: string; origin: "upload" | "repository" | "gist"; url?: string };
 
 function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, aiAvailable, onStepChange, onBack }: { repo: string; number: number; initialStep: number | null; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; aiAvailable: boolean; onStepChange: (step: number) => void; onBack: () => void }) {
   const [pull, setPull] = useState<PullRequestDetail | null>(null);
   const [replay, setReplay] = useState<ReplayResult | null>(null);
   const [attachment, setAttachment] = useState<RecordingAttachment | null>(null);
-  const [committedRecording, setCommittedRecording] = useState<RecordingAttachment | null>(null);
+  const [linkedRecording, setLinkedRecording] = useState<RecordingAttachment | null>(null);
   const [recordingBusy, setRecordingBusy] = useState(true);
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const recordingInputRef = useRef<HTMLInputElement>(null);
@@ -1055,12 +1055,12 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         setStateReady(true);
         setLoading(false);
         try {
-          const result = await api<{ source: string | null; path: string; headSha: string }>(`/api/github/recording?${new URLSearchParams({ repo, number: String(number), headSha: pull.headSha })}`);
+          const result = await api<{ source: string | null; path: string; headSha: string; origin: "repository" | "gist"; url?: string }>(`/api/github/recording?${new URLSearchParams({ repo, number: String(number), headSha: pull.headSha })}`);
           if (result.source !== null) {
             const recording = await parseRecording(result.source);
             if (!active) return;
-            const found: RecordingAttachment = { recording, name: result.path, origin: "repository", headSha: result.headSha };
-            setCommittedRecording(found);
+            const found: RecordingAttachment = { recording, name: result.path, origin: result.origin, url: result.url, headSha: result.headSha };
+            setLinkedRecording(found);
             if (!cached || cached.replay.recordingId === recording.session.id) {
               setAttachment(found);
               setReplay(recordingReplay(recording, found.name));
@@ -1069,7 +1069,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
             }
           }
         } catch (error) {
-          if (active) setRecordingError(error instanceof Error ? error.message : "Could not load the committed recording.");
+          if (active) setRecordingError(error instanceof Error ? error.message : "Could not load the PR recording.");
         } finally { if (active) setRecordingBusy(false); }
       } catch (error) {
         if (active) setError(error instanceof Error ? error.message : "Could not load the pull request.");
@@ -1316,17 +1316,17 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
       <div className="replay-source-bar">
         <div className="diff-scope-toggle" role="group" aria-label="Replay source">
           <button className={!isRecorded ? "active" : ""} aria-pressed={!isRecorded} disabled={building || recordingBusy} onClick={selectAiSynopsis}>AI synopsis</button>
-          <button className={isRecorded ? "active" : ""} aria-pressed={isRecorded} disabled={building || recordingBusy || !(attachment ?? committedRecording)} onClick={() => { const value = attachment ?? committedRecording; if (value) selectRecording(value); }}>Recording</button>
+          <button className={isRecorded ? "active" : ""} aria-pressed={isRecorded} disabled={building || recordingBusy || !(attachment ?? linkedRecording)} onClick={() => { const value = attachment ?? linkedRecording; if (value) selectRecording(value); }}>Recording</button>
         </div>
         <button className="secondary-button compact" disabled={building || recordingBusy} onClick={() => recordingInputRef.current?.click()}><FileUp size={14} />{recordingBusy ? "Checking recording…" : "Attach recording"}</button>
-        {committedRecording && attachment?.origin === "upload" && <button className="text-button" onClick={() => selectRecording(committedRecording)}>Use committed recording</button>}
-        <span>{isRecorded ? replay.recordingName : committedRecording ? "Recording found in this PR" : `Commit ${PR_RECORDING_PATH} or attach a file`}</span>
+        {linkedRecording && attachment?.origin === "upload" && <button className="text-button" onClick={() => selectRecording(linkedRecording)}>Use PR recording</button>}
+        <span>{isRecorded ? replay.recordingName : linkedRecording ? "Recording found in this PR" : `Link a gist, commit ${PR_RECORDING_PATH}, or attach a file`}</span>
         {!aiAvailable && <a href="/api/auth/openrouter">Connect OpenRouter for AI</a>}
         <input ref={recordingInputRef} type="file" accept=".jsonl,application/x-ndjson" hidden aria-label="Attach recording to this PR" onChange={(event) => { void importRecording(event.target.files?.[0]); event.target.value = ""; }} />
       </div>
       {recordingError && <div className="error-banner" role="alert">{recordingError}</div>}
       {isRecorded && <div className="recording-review-notice">
-        {recording ? <>Recorded checkpoints · {attachment?.origin === "repository" ? `From this PR at ${pull.headSha.slice(0, 8)}` : "Attached to this PR for this tab; reattach after refreshing"}. Matching PR lines receive inline comments; historical-line notes go into the review summary.</> : <>Reattach <strong>{replay.recordingName}</strong> to resume recorded playback. Your review is restored; the full PR diff is still available.</>}
+        {recording ? <>Recorded checkpoints · {attachment?.origin === "gist" ? <a href={attachment.url} target="_blank" rel="noreferrer">Gist linked in this PR</a> : attachment?.origin === "repository" ? `From this PR at ${pull.headSha.slice(0, 8)}` : "Attached to this PR for this tab; reattach after refreshing"}. Matching PR lines receive inline comments; historical-line notes go into the review summary.</> : <>Reattach <strong>{replay.recordingName}</strong> to resume recorded playback. Your review is restored; the full PR diff is still available.</>}
       </div>}
       {!replay ? (
         <section className="build-replay">

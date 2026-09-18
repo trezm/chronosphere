@@ -16,7 +16,29 @@ Reasons should be brief explanations of observable intent or evidence, such as �
 
 ## Share a replay with a PR
 
-When the user requests a PR with its recording, export the finished session before committing:
+For a recorded task associated with a PR, offer a **secret gist** as the sharing option. Keep the committed-file and manual-attachment options available if the user declines. A secret gist is unlisted, not private: anyone with its URL can read it, even when the PR itself is private.
+
+### Optional secret gist
+
+1. Finish the session and export a validated copy to a temporary directory, named exactly `replay.jsonl`, using `export --session <session.jsonl> --out <temporary-directory>/replay.jsonl`. Inspect its source/command output and report capture gaps. Gist playback supports up to 10 MB; use committed or manual playback for larger recordings. Keep this temporary export and the raw log out of the commit.
+2. Once the file is ready, ask: **“Upload this replay to a secret GitHub gist and add its link to PR #<number>? Anyone with the link can read its source snapshots and command output.”** Identify the file and size. Wait for an explicit yes; no response or a request to create a PR is not consent to upload the replay. Reuse explicit authorization already given for this particular upload. If declined, keep the log local and offer the alternatives below without automatically sharing it.
+3. After approval, use authenticated GitHub CLI (`gh`) to create the gist: `gh gist create <temporary-directory>/replay.jsonl --desc 'Chronosphere replay'`. Gists are secret by default; never pass `--public`. If credentials lack gist permission, report it and let the user authorize the required access; do not broaden permissions automatically. Upload only the exported JSONL, never the `.local.json` companion.
+4. Read the new gist through `gh api gists/<gist-id>`. Verify `public` is `false` and it contains `replay.jsonl`. Retain the returned gist URL immediately. Read `history[0].version` and append that revision to the gist URL to pin the recording. Verify the raw file at that revision matches the exported bytes before linking it.
+5. Read the latest PR description. Preserve its content and append a blank line followed by exactly `chronosphere-replay: <gist-url>` as the final line, outside code fences. Use the revision-pinned URL from step 4. Update with `gh pr edit <number> --repo <owner/repo> --body-file <temporary-body-file>` (or a structured API body); do not interpolate multiline PR text into shell commands. If creating the requested PR now, include the tag at the end of its body instead.
+6. Keep exactly one active tag. If the PR already has one, inspect it before creating another gist: reuse it if it already holds this recording; otherwise explain the replacement in the approval question. On an uncertain create result, inspect the user's recent gists before retrying. If upload succeeds but the PR update fails, report the gist URL and retry only the PR update; do not create duplicate gists or silently delete an uploaded one.
+7. Read the PR description back to confirm its final tag, and return the PR and gist links. Chronosphere loads the tagged gist before looking for a committed replay. An unavailable or malformed tagged gist is an error, not a reason to silently load another recording.
+
+For example, the final PR-description line has this form:
+
+```text
+chronosphere-replay: https://gist.github.com/<owner>/<gist-id>/<revision>
+```
+
+Do not run these posting steps merely because this skill describes them. The user's per-recording sharing choice controls them. Do not claim a gist was created or linked unless those operations succeeded.
+
+### Commit the replay instead
+
+When the user chooses to commit the recording, export the finished session before committing:
 
 ```sh
 node --experimental-strip-types <chronosphere>/scripts/record.mjs export --session <session.jsonl>

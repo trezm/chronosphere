@@ -12,7 +12,7 @@ export function withoutRecordingDiff(diff: string): string {
 export async function readRecordingResponse(response: Response, limit = 20 * 1024 * 1024): Promise<string> {
   if (Number(response.headers.get("content-length")) > limit) {
     await response.body?.cancel();
-    throw new Error("Recording exceeds the 20 MB import limit.");
+    throw new Error("Recording download exceeds the size limit.");
   }
   if (!response.body) return "";
   const reader = response.body.getReader();
@@ -23,7 +23,7 @@ export async function readRecordingResponse(response: Response, limit = 20 * 102
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > limit) { await reader.cancel(); throw new Error("Recording exceeds the 20 MB import limit."); }
+      if (size > limit) { await reader.cancel(); throw new Error("Recording download exceeds the size limit."); }
       result += decoder.decode(value, { stream: true });
     }
     return result + decoder.decode();
