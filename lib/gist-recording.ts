@@ -49,7 +49,9 @@ export async function loadGistRecording(gist: ReplayGist, request: typeof fetch 
     throw new Error("Gist uploads must be 10 MB or smaller after compression. Use a committed replay or manual attachment for larger recordings.");
   }
   const raw = file.raw_url?.match(/^https:\/\/gist\.githubusercontent\.com\/[a-zA-Z0-9-]+\/([a-fA-F0-9]{5,64})\/raw\/([a-fA-F0-9]{40})\/(replay\.jsonl?)$/);
-  if (!raw || raw[3] !== filename || raw[1].toLowerCase() !== gist.id || (gist.revision && raw[2].toLowerCase() !== gist.revision)) {
+  // The revision-pinned metadata response supplies an immutable file URL.
+  // Its raw-file hash differs from the gist commit hash, even on first creation.
+  if (!raw || raw[3] !== filename || raw[1].toLowerCase() !== gist.id) {
     throw new Error("GitHub returned an unexpected replay download URL.");
   }
   // Always fetch raw content: Gist API content is truncated above 1 MB.

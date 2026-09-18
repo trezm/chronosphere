@@ -54,12 +54,20 @@ test("gist loading uses raw content at a pinned revision and never forwards cred
   }
 });
 
-test("raw downloads must match the expected host, gist, revision and filename", async () => {
-  for (const raw_url of ["https://localhost/replay.jsonl", raw.replace("gist.githubusercontent.com", "evil.example"), raw.replace(id, "c".repeat(32)), raw.replace(revision, "d".repeat(40)), raw.replace("replay.jsonl", "credentials.json"), raw + "?redirect=1", raw.replace("https://", "https://user:secret@"), raw.replace("/raw/", "/../raw/")]) {
+test("raw downloads must match the expected host, gist, immutable file hash and filename", async () => {
+  for (const raw_url of ["https://localhost/replay.jsonl", raw.replace("gist.githubusercontent.com", "evil.example"), raw.replace(id, "c".repeat(32)), raw.replace(revision, "latest"), raw.replace("replay.jsonl", "credentials.json"), raw + "?redirect=1", raw.replace("https://", "https://user:secret@"), raw.replace("/raw/", "/../raw/")]) {
     const { request, calls } = fixture("valid", { raw_url });
     await assert.rejects(loadGistRecording(replayGistFromBody(tag(`${url}/${revision}`)), request), /unexpected replay download URL/);
     assert.equal(calls.length, 1);
   }
+});
+
+test("revision-pinned gist metadata can reference a different immutable raw-file hash", async () => {
+  const rawFile = raw.replace(revision, "c".repeat(40));
+  const { request, calls } = fixture("original file", { raw_url: rawFile });
+  assert.equal(await loadGistRecording({ id, url, revision }, request), "original file");
+  assert.equal(calls[0].target, `https://api.github.com/gists/${id}/${revision}`);
+  assert.equal(calls[1].target, rawFile);
 });
 
 test("missing, oversized and incomplete gist files fail explicitly", async () => {
