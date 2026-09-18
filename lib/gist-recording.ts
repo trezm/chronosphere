@@ -1,3 +1,4 @@
+import { COMPRESSED_RECORDING_FILE, decompressRecording } from "./recording-transport.ts";
 import { readRecordingResponse } from "./pr-recording.ts";
 
 export const GIST_RECORDING_FILE = "replay.jsonl";
@@ -38,13 +39,17 @@ export async function loadGistRecording(gist: ReplayGist, request: typeof fetch 
   const data = JSON.parse(await readRecordingResponse(metadata, 2 * 1024 * 1024)) as {
     files?: Record<string, { size?: number; raw_url?: string }>;
   };
-  const file = data?.files?.[GIST_RECORDING_FILE];
-  if (!file) throw new Error(`The replay gist must contain a file named ${GIST_RECORDING_FILE}.`);
+  const compressed = data?.files?.[COMPRESSED_RECORDING_FILE];
+  const plain = data?.files?.[GIST_RECORDING_FILE];
+  if (compressed && plain) throw new Error("Keep exactly one replay file in the gist: replay.json (compressed) or replay.jsonl (plain).");
+  const filename = compressed ? COMPRESSED_RECORDING_FILE : GIST_RECORDING_FILE;
+  const file = compressed ?? plain;
+  if (!file) throw new Error(`The replay gist must contain a file named ${GIST_RECORDING_FILE} or ${COMPRESSED_RECORDING_FILE}.`);
   if (!Number.isSafeInteger(file.size) || file.size! < 0 || file.size! > GIST_RECORDING_MAX_BYTES) {
-    throw new Error("Gist recordings must be 10 MB or smaller. Use a committed replay or manual attachment for larger recordings.");
+    throw new Error("Gist uploads must be 10 MB or smaller after compression. Use a committed replay or manual attachment for larger recordings.");
   }
-  const raw = file.raw_url?.match(/^https:\/\/gist\.githubusercontent\.com\/[a-zA-Z0-9-]+\/([a-fA-F0-9]{5,64})\/raw\/([a-fA-F0-9]{40})\/replay\.jsonl$/);
-  if (!raw || raw[1].toLowerCase() !== gist.id || (gist.revision && raw[2].toLowerCase() !== gist.revision)) {
+  const raw = file.raw_url?.match(/^https:\/\/gist\.githubusercontent\.com\/[a-zA-Z0-9-]+\/([a-fA-F0-9]{5,64})\/raw\/([a-fA-F0-9]{40})\/(replay\.jsonl?)$/);
+  if (!raw || raw[3] !== filename || raw[1].toLowerCase() !== gist.id || (gist.revision && raw[2].toLowerCase() !== gist.revision)) {
     throw new Error("GitHub returned an unexpected replay download URL.");
   }
   // Always fetch raw content: Gist API content is truncated above 1 MB.
@@ -52,5 +57,5 @@ export async function loadGistRecording(gist: ReplayGist, request: typeof fetch 
   if (!response.ok) throw new Error(`Could not download the replay gist (GitHub ${response.status}).`);
   const source = await readRecordingResponse(response, GIST_RECORDING_MAX_BYTES);
   if (new TextEncoder().encode(source).length !== file.size) throw new Error("The replay gist download is incomplete. Try again or attach the original recording.");
-  return source;
+  return decompressRecording(source, !!compressed);
 }

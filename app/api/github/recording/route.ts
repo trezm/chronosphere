@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
     const pull = await githubJson<{ body: string | null; head: { sha: string; repo: { full_name: string } | null } }>(token, `/repos/${fullName}/pulls/${number}`);
     if (pull.head.sha !== headSha) return Response.json({ error: "This PR changed. Reopen it before loading its recording." }, { status: 409 });
     const gist = replayGistFromBody(pull.body);
-    if (gist) return Response.json({ source: await loadGistRecording(gist), path: "Gist · replay.jsonl", origin: "gist", url: gist.url, headSha }, { headers: { "Cache-Control": "no-store" } });
+    if (gist) return Response.json({ source: await loadGistRecording(gist), path: "Gist replay", origin: "gist", url: gist.url, headSha }, { headers: { "Cache-Control": "no-store" } });
     if (!pull.head.repo) throw new Error("The PR's source repository is unavailable.");
     try {
       const response = await githubFetch(token, `/repos/${pull.head.repo.full_name}/contents/${PR_RECORDING_PATH}?ref=${headSha}`, { headers: { Accept: "application/vnd.github.raw+json" } });

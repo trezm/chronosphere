@@ -29,7 +29,7 @@ PR replay can use an AI reconstruction or recorded workspace checkpoints with ex
 
 Open a pull request in Chronosphere. The replay source bar lets you switch between **AI synopsis** and **Recording**, or **Attach recording** from a local `.jsonl` file. Recorded steps use the same timeline, file tabs, syntax-highlighted diffs, pending comments, review submission, and merge controls as reconstructed steps. GitHub sign-in is required; OpenRouter is only needed for AI features.
 
-The recording skill first asks whether you want to share the finished replay through a **secret GitHub gist**. If you approve, it uploads only `replay.jsonl` and appends a final line to the PR description:
+The recording skill first asks whether you want to share the finished replay through a **secret GitHub gist**. If you approve, it exports gzip + Base64 in `replay.json` and uploads only that compressed file and appends a final line to the PR description:
 
 ```text
 chronosphere-replay: https://gist.github.com/<owner>/<gist-id>/<revision>
@@ -37,7 +37,15 @@ chronosphere-replay: https://gist.github.com/<owner>/<gist-id>/<revision>
 
 A secret gist is unlisted, not private: anyone with the link can read the recording's source snapshots and command output, even if the PR is private. The skill waits for explicit consent before uploading. It pins the gist revision, preserves the existing PR description, and keeps raw sessions and locator files local. Creating gists requires an authenticated GitHub CLI with gist permission.
 
-Chronosphere recognizes one standalone tag outside code fences. The tag takes precedence over a committed replay; missing, invalid, or unavailable gist data produces an error so another recording is not silently substituted. Gists must contain `replay.jsonl` and be at most 10 MB (GitHub's raw-file limit); committed files and manual imports retain the 20 MB limit. The app fetches gist data without sending your repository credentials to the download host.
+Chronosphere recognizes one standalone tag outside code fences. The tag takes precedence over a committed replay; missing, invalid, or unavailable gist data produces an error so another recording is not silently substituted. Gists accept compressed `replay.json` or legacy plain `replay.jsonl`, with a 10 MB upload limit (GitHub's raw-file limit). Compressed envelopes declare their version, encoding, original byte count, and SHA-256 hash. Expansion is streamed and independently capped at 20 MB, then the byte count, hash, and recording contents are validated. Committed files and manual imports retain the 20 MB expanded limit; manual imports also accept compressed `replay.json`. Compression does not encrypt the recording. The app fetches gist data without sending your repository credentials to the download host.
+
+The gist export command is:
+
+```sh
+npm run record -- export --compress --session /absolute/path/to/session.jsonl --out /temporary/replay.json
+```
+
+An explicit output path keeps the committed `.chronosphere/replay.jsonl` convention unchanged. Plain JSONL recording and export remain available without `--compress`.
 
 To commit the recording with the PR instead, finish the session and export it:
 

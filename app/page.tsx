@@ -1,5 +1,6 @@
 "use client";
 
+import { decompressRecording } from "@/lib/recording-transport";
 import {
   ArrowLeft,
   ArrowRight,
@@ -1091,7 +1092,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     setRecordingBusy(true); setRecordingError(null); setPlaying(false);
     try {
       if (file.size > RECORDING_MAX_BYTES) throw new Error("Choose a recording smaller than 20 MB.");
-      const recording = await parseRecording(await file.text());
+      const recording = await parseRecording(await decompressRecording(await file.text()));
       selectRecording({ recording, name: file.name, headSha: pull.headSha, origin: "upload" });
     } catch (error) { setRecordingError(error instanceof Error ? error.message : "Could not read this recording."); }
     finally { setRecordingBusy(false); }
@@ -1322,7 +1323,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         {linkedRecording && attachment?.origin === "upload" && <button className="text-button" onClick={() => selectRecording(linkedRecording)}>Use PR recording</button>}
         <span>{isRecorded ? replay.recordingName : linkedRecording ? "Recording found in this PR" : `Link a gist, commit ${PR_RECORDING_PATH}, or attach a file`}</span>
         {!aiAvailable && <a href="/api/auth/openrouter">Connect OpenRouter for AI</a>}
-        <input ref={recordingInputRef} type="file" accept=".jsonl,application/x-ndjson" hidden aria-label="Attach recording to this PR" onChange={(event) => { void importRecording(event.target.files?.[0]); event.target.value = ""; }} />
+        <input ref={recordingInputRef} type="file" accept=".jsonl,.json,application/json,application/x-ndjson" hidden aria-label="Attach recording to this PR" onChange={(event) => { void importRecording(event.target.files?.[0]); event.target.value = ""; }} />
       </div>
       {recordingError && <div className="error-banner" role="alert">{recordingError}</div>}
       {isRecorded && <div className="recording-review-notice">

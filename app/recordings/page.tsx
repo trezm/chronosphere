@@ -1,5 +1,6 @@
 "use client";
 
+import { decompressRecording } from "@/lib/recording-transport";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronLeft, ChevronRight, FileUp, Pause, Play } from "lucide-react";
 import Link from "next/link";
@@ -43,7 +44,7 @@ export default function RecordingsPage() {
     setBusy(true); setError(null); setPlaying(false);
     try {
       if (file.size > RECORDING_MAX_BYTES) throw new Error("Choose a recording smaller than 20 MB.");
-      const result = await parseRecording(await file.text());
+      const result = await parseRecording(await decompressRecording(await file.text()));
       if (request !== importRequest.current) return;
       setRecording(result); setStep(0); setSelectedPath(""); setView("changes");
     } catch (error) {
@@ -55,14 +56,14 @@ export default function RecordingsPage() {
     <header className="app-header">
       <Link className="recording-home" href="/"><ArrowLeft size={16} />Chronosphere</Link>
       <div className="header-right"><span className="recording-badge">Local experiment</span><button className="secondary-button" disabled={busy} onClick={() => fileInput.current?.click()}><FileUp size={16} />{busy ? "Checking recording…" : "Open recording"}</button></div>
-      <input ref={fileInput} type="file" accept=".jsonl,application/x-ndjson" hidden aria-label="Open recording file" onChange={(event) => { void load(event.target.files?.[0]); event.target.value = ""; }} />
+      <input ref={fileInput} type="file" accept=".jsonl,.json,application/json,application/x-ndjson" hidden aria-label="Open recording file" onChange={(event) => { void load(event.target.files?.[0]); event.target.value = ""; }} />
     </header>
     {error && <div className="recording-error" role="alert">{error}</div>}
     {!recording ? <main className="recording-empty">
       <span className="recording-badge">Recorded checkpoints</span>
       <h1>Watch the changes as they happened.</h1>
       <p>Open a local recording to explore edits, explanations, and command results—including changes that were later undone.</p>
-      <button className="primary-button" disabled={busy} onClick={() => fileInput.current?.click()}><FileUp size={17} />{busy ? "Checking recording…" : "Choose a .jsonl recording"}</button>
+      <button className="primary-button" disabled={busy} onClick={() => fileInput.current?.click()}><FileUp size={17} />{busy ? "Checking recording…" : "Choose a recording"}</button>
       <p className="recording-privacy">The file stays in this browser tab. No upload, account, or AI connection is needed.</p>
       <details className="recording-instructions"><summary>Create a recording</summary><p>In the Chronosphere checkout, start a session before editing:</p><pre><code>{`npm run record -- start --title 'My change'\n\n# After an edit, use the session path printed above:\nnpm run record -- checkpoint --session SESSION.jsonl \\\n  --title 'Add validation' --reason 'Reject invalid input early'`}</code></pre><p>Or run <code>npm run record:demo</code> for a small session with a failed test and a fix.</p></details>
     </main> : <main className="recording-main">

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { contentHash, parseRecording, recordingStateAt } from "../lib/recording.ts";
+import { decompressRecording } from "../lib/recording-transport.ts";
 
 const recorder = resolve("scripts/record.mjs");
 async function fixture(t) {
@@ -169,6 +170,7 @@ test("PR export includes only a finished portable log and supports replacing the
   const pending = f.run("export", "--session", f.session);
   assert.equal(pending.status, 1);
   assert.match(pending.stderr, /Finish the session/);
+  assert.equal(f.run("export", "--compress", "--session", f.session, "--out", join(f.repo, "replay.json")).status, 1);
   await writeFile(join(f.repo, "app.js"), "after\n");
   f.okay("finish", "--session", f.session, "--title", "Done", "--reason", "Ready for review");
   f.okay("export", "--session", f.session);
@@ -179,4 +181,10 @@ test("PR export includes only a finished portable log and supports replacing the
   f.okay("export", "--session", f.session);
   assert.equal((await parseRecording(await readFile(artifact, "utf8"))).events[0].type, "finish");
   assert.equal(f.run("export", "--session", f.session, "--out", f.session).status, 1);
+  const compressed = join(f.repo, "replay.json");
+  f.okay("export", "--session", f.session, "--compress", "--out", compressed);
+  assert.equal(await decompressRecording(await readFile(compressed, "utf8")), await readFile(f.session, "utf8"));
+  assert.equal(f.run("export", "--compress", "--session", f.session).status, 1);
+  assert.equal(f.run("inspect", "--compress", "--session", f.session).status, 1);
+  assert.equal(await readFile(artifact, "utf8"), await readFile(f.session, "utf8"));
 });

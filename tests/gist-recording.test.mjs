@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { GIST_RECORDING_MAX_BYTES, loadGistRecording, replayGistFromBody } from "../lib/gist-recording.ts";
 import { contentHash, parseRecording } from "../lib/recording.ts";
+import { compressRecording } from "../lib/recording-transport.ts";
 
 const id = "a".repeat(32), revision = "b".repeat(40);
 const url = `https://gist.github.com/author/${id}`;
@@ -91,4 +92,17 @@ test("downloaded logs still pass through recording hash and event validation", a
   const source = JSON.stringify(session) + "\n";
   assert.equal((await parseRecording(await loadGistRecording({ id, url }, fixture(source).request))).session.id, "session");
   await assert.rejects(parseRecording(await loadGistRecording({ id, url }, fixture(source.replace("recorded code", "tampered code")).request)), /hash/i);
+});
+
+test("compressed gist files are decoded before playback and ambiguous files are rejected", async () => {
+  const source = "original JSONL content\n".repeat(2000);
+  const compressed = await compressRecording(source);
+  let calls = 0;
+  const request = async (target) => {
+    if (++calls === 1) return Response.json({ files: { "replay.json": { raw_url: raw.replace(".jsonl", ".json"), size: Buffer.byteLength(compressed) } } });
+    assert.equal(target, raw.replace(".jsonl", ".json"));
+    return new Response(compressed);
+  };
+  assert.equal(await loadGistRecording({ id, url }, request), source);
+  await assert.rejects(loadGistRecording({ id, url }, async () => Response.json({ files: { "replay.json": {}, "replay.jsonl": {} } })), /exactly one replay file/);
 });
