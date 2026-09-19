@@ -161,6 +161,7 @@ function AppHeader({
     <header className="app-header">
       <Brand />
       <div className="header-right">
+        <a className="recording-home" href="https://github.com/trezm/chronosphere-skills" target="_blank" rel="noreferrer">Agent skills <ExternalLink size={12} /></a>
         <Link className="recording-home" href="/recordings">Open recording</Link>
         <span className="header-context">PRs, reconstructed</span>
         <button className="icon-button quiet theme-toggle" onClick={onToggleTheme} aria-label="Toggle color mode" title="Toggle color mode">

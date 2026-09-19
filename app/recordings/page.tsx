@@ -65,6 +65,7 @@ export default function RecordingsPage() {
       <p>Open a local recording to explore edits, explanations, and command results—including changes that were later undone.</p>
       <button className="primary-button" disabled={busy} onClick={() => fileInput.current?.click()}><FileUp size={17} />{busy ? "Checking recording…" : "Choose a recording"}</button>
       <p className="recording-privacy">The file stays in this browser tab. No upload, account, or AI connection is needed.</p>
+      <p><a className="recording-home" href="https://github.com/trezm/chronosphere-skills" target="_blank" rel="noreferrer">Get agent skills to record your work or reconstruct a PR</a></p>
       <details className="recording-instructions"><summary>Create a recording</summary><p>In the Chronosphere checkout, start a session before editing:</p><pre><code>{`npm run record -- start --title 'My change'\n\n# After an edit, use the session path printed above:\nnpm run record -- checkpoint --session SESSION.jsonl \\\n  --title 'Add validation' --reason 'Reject invalid input early'`}</code></pre><p>Or run <code>npm run record:demo</code> for a small session with a failed test and a fix.</p></details>
     </main> : <main className="recording-main">
       <section className="recording-heading">

@@ -14,7 +14,8 @@
     "check": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "record": "node --experimental-strip-types scripts/record.mjs",
-    "record:demo": "node scripts/record-demo.mjs"
+    "record:demo": "node scripts/record-demo.mjs",
+    "skills:export": "node scripts/export-skills.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",

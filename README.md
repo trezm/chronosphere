@@ -60,6 +60,16 @@ A manually attached file is associated with the selected PR/head for the current
 
 Inline comments are anchored only when the recorded whole-file version matches the verified PR base/head file and the line is present in GitHub's diff. Comments on earlier or discarded versions go into the review summary with their file, line, event, and step instead of being attached to an incorrect GitHub line. **Full PR** always shows the current authoritative diff. Review submission rejects a PR head that changed after opening it.
 
+## Reconstruct a PR with any agent
+
+Both skills are publicly available at [trezm/chronosphere-skills](https://github.com/trezm/chronosphere-skills), with standalone helpers and [ZIP downloads](https://github.com/trezm/chronosphere-skills/releases/latest). Install with `npx skills add trezm/chronosphere-skills`, or choose one with `--skill chronosphere-record` or `--skill chronosphere-reconstruct`.
+
+The portable [`chronosphere-reconstruct` skill](skills/chronosphere-reconstruct/SKILL.md) lets an agent generate a compatible `replay.jsonl` from an existing PR outside the Chronosphere app. For example: **“Use your chronosphere-reconstruct skill to generate a replay for owner/repo PR #1234.”** Give the agent the entire `skills/chronosphere-reconstruct` folder in its supported skill location, or supply the instructions and bundled files to an agent with file execution tools. It needs access to the PR's complete endpoint files and Python 3.9+; Git is optional. It needs no Chronosphere server, application dependencies, or OpenRouter account.
+
+The agent groups changes into an understandable sequence. The bundled helper reads pinned Git snapshots (or a manifest assembled through repository connectors), computes hashes, and verifies that replaying every step reaches the included head files exactly. It preserves additions, deletions, and renames, supports intermediate snapshots for splitting a file across steps, and reports unsupported files and coverage gaps. Generation never checks out the PR or executes its code.
+
+The resulting file imports through **Attach recording** or `/recordings`. The current v1 importer uses the Recording category; the replay title and opening explanation label the sequence as **reconstructed**, with generation timestamps and no invented test results or development history. The agent returns the file locally; publishing it is a separate choice. Use [`chronosphere-record`](SKILL.md) instead when you want to capture actual work as it happens.
+
 ## Local recording experiment
 
 Run `npm run record:demo`, then open `/recordings` and choose the printed `.jsonl` path. The demo runs a real failing test in a temporary repository, fixes the implementation, reruns the test, and creates then deletes a scratch file. The viewer preserves every checkpoint even though the scratch file is absent from the final workspace. This route needs no GitHub or OpenRouter connection.
@@ -96,6 +106,10 @@ Use the [`chronosphere-record` skill](SKILL.md) to have a coding agent follow th
 The recorder selects Git-tracked and non-ignored untracked UTF-8 text files. It skips common credential names, symlinks, binary files, and files larger than 256 KB; the log lists omissions within the selected scope. Git-ignored untracked files are not read. A previously recorded file that becomes ignored or unreadable stays at its last captured text and is marked omitted, rather than being misrepresented as deleted. Initial/current readable snapshots are limited to 8 MB and 5,000 files; sessions to 20 MB and 2,000 events. These are bounded experimental limits. Source text and command output may contain sensitive material even with filename exclusions; inspect the artifact before choosing to share it.
 
 The viewer checks content hashes, contiguous event order, unique IDs, and each patch's prior state before loading. It supports playback, arbitrary scrubbing, before/after files, complete captured workspace states, and command evidence. For GitHub comments, use the PR workspace and attach the same recording; the standalone viewer remains available for local inspection.
+
+## Publish skill updates
+
+Run `npm run skills:export -- /absolute/path/to/new-export` to create a public distribution from an explicit list of skill, helper, documentation, and test files. The destination must not exist. This exports no application code beyond the recorder and its two portable format utilities, no repository history, and no recordings or local configuration. Run `npm test` in the exported directory, validate both skills, then review and publish those files to `trezm/chronosphere-skills`. Keep the public root and per-skill MIT licenses with the distribution. Update the distribution package version under `skills/distribution` for each release, attach one ZIP per skill with SHA-256 checksums, and tag the corresponding public commit. The public repository runs the portable tests on Node 22 and 24.
 
 ## Local setup
 
