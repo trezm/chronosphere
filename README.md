@@ -12,6 +12,7 @@ PR replay can use an AI reconstruction or recorded workspace checkpoints with ex
 - Involvement filters for authored, assigned, and review-requested PRs
 - Author, assignee, and requested-reviewer context
 - LLM-generated replay timeline with playable/scrubbable diff states
+- Unified and side-by-side diff layouts for reconstructed steps, recorded checkpoints, and the full PR
 - Steps that span several files, such as a trait and its implementation, shown as file tabs above the diff
 - Model-selected high-impact markers for the most consequential replay steps
 - On-demand two-stage AI review: a scout triages the diff, then a reviewer returns high-confidence findings

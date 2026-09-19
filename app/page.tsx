@@ -41,7 +41,7 @@ import { contentHash, parseRecording, RECORDING_MAX_BYTES, type RecordedChange, 
 import { historicalReviewNote, recordedChangeDiff, recordedLineAnchor, recordingReplay, type ReviewAnchor } from "@/lib/recording-review";
 import { PR_RECORDING_PATH } from "@/lib/pr-recording";
 import { api, authorizedFetch, onGithubSessionExpired } from "@/lib/api";
-import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap } from "@/lib/diff";
+import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap, sideBySideRows } from "@/lib/diff";
 import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
 import { readReplayEvents } from "@/lib/replay-stream";
 import { findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, sortFindings } from "@/lib/review-findings";
@@ -423,6 +423,7 @@ function ReplayFileView({
   replayChunks,
   changeSteps,
   showFullDiff,
+  diffLayout,
   contentRepo,
   contentRef,
   comments,
@@ -445,6 +446,7 @@ function ReplayFileView({
   replayChunks: ReplayChunk[];
   changeSteps: ReadonlyMap<number, number>;
   showFullDiff: boolean;
+  diffLayout: "unified" | "split";
   contentRepo: string;
   contentRef: string;
   comments: PendingComment[];
@@ -554,10 +556,23 @@ function ReplayFileView({
       setExpanding(null);
     }
   };
-  const contextRows = (start: number, end: number) => {
+  const contextRows = (start: number, end: number, oldOffset: number) => {
     if (!contentLines || end < start) return null;
     return Array.from({ length: end - start + 1 }, (_, offset) => {
       const line = start + offset;
+      if (diffLayout === "split") {
+        const oldLine = usesOldContent ? line : line + oldOffset;
+        const newLine = usesOldContent ? line - oldOffset : line;
+        return <div className="split-row" key={`context-${line}`}>
+          {[oldLine, newLine].map((number, side) => <div className="split-cell" key={side}>
+            <div className="diff-row context expanded-context">
+              <span className="context-gutter" />
+              <span className="line-number">{number}</span>
+              <code><i> </i>{renderCode(highlightedContent?.[line - 1], contentLines[line - 1])}</code>
+            </div>
+          </div>)}
+        </div>;
+      }
       return (
         <div className="diff-row context expanded-context" key={`context-${line}`}>
           <span className="context-gutter" />
@@ -569,13 +584,14 @@ function ReplayFileView({
     });
   };
 
-  const commentTarget = (line: DiffLine) => {
-    const resolved = resolveComment?.(line);
+  const commentTarget = (line: DiffLine, side?: "LEFT" | "RIGHT") => {
+    const resolved = resolveComment?.(side === "LEFT" ? { ...line, newLine: null } : side === "RIGHT" ? { ...line, oldLine: null } : line);
+    const fallbackSide = side ?? (line.type === "delete" ? "LEFT" : "RIGHT");
     return {
     path: resolved?.path ?? file.path,
     historical: !!resolveComment && !resolved,
-    line: resolved?.line ?? (line.type === "delete" ? line.oldLine : line.newLine),
-    side: resolved?.side ?? (line.type === "delete" ? "LEFT" as const : "RIGHT" as const),
+    line: resolved?.line ?? (fallbackSide === "LEFT" ? line.oldLine : line.newLine),
+    side: resolved?.side ?? fallbackSide,
     index: line.changedIndex,
   }; };
   const submitComment = () => {
@@ -601,100 +617,122 @@ function ReplayFileView({
   return (
     <article className="diff-file" hidden={hidden}>
       <header><span className="file-dot" /> <code>{file.oldPath && file.oldPath !== file.path ? `${file.oldPath} → ` : ""}{file.path}</code><span>{fileComments.length ? `${fileComments.length} pending` : file.status}</span></header>
-      <div className="diff-table">
+      <div className={`diff-table ${diffLayout === "split" ? "diff-table-split" : ""}`}>
+        {diffLayout === "split" && <div className="split-heading"><span>Before</span><span>After</span></div>}
         {visibleHunks.map((hunk) => {
           const hunkBounds = bounds(hunk.sourceLines, hunk.header);
+          const header = hunk.header.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+          const oldCount = Number(header?.[2] ?? 1), newCount = Number(header?.[4] ?? 1);
+          const oldStart = Number(header?.[1] ?? 1) + (oldCount === 0 ? 1 : 0);
+          const newStart = Number(header?.[3] ?? 1) + (newCount === 0 ? 1 : 0);
+          const beforeOffset = oldStart - newStart;
+          const afterOffset = oldStart + oldCount - newStart - newCount;
           const expansion = expanded[hunk.originalIndex] ?? { before: 0, after: 0 };
           const previousLast = hunk.originalIndex > 0 ? hunkBoundsAt(hunk.originalIndex - 1).last : 0;
           const nextFirst = hunk.originalIndex < file.hunks.length - 1 ? hunkBoundsAt(hunk.originalIndex + 1).first : (contentLines?.length ?? Infinity) + 1;
           const canExpandBefore = expansion.before + (expanded[hunk.originalIndex - 1]?.after ?? 0) < hunkBounds.first - previousLast - 1;
           const canExpandAfter = expansion.after + (expanded[hunk.originalIndex + 1]?.before ?? 0) < nextFirst - hunkBounds.last - 1;
+          const renderLine = (lineIndex: number, side?: "LEFT" | "RIGHT", previousIndex: number | null = lineIndex - 1) => {
+            const line = hunk.lines[lineIndex];
+            const current = inRanges(fileRanges, line.changedIndex);
+            const lineStep = line.changedIndex === null ? undefined : changeSteps.get(line.changedIndex);
+            const past = !showFullDiff && lineStep !== undefined && lineStep < step;
+            const future = !showFullDiff && lineStep !== undefined && lineStep > step;
+            const previousLine = previousIndex === null ? undefined : hunk.lines[previousIndex];
+            const previousLineStep = previousLine?.changedIndex === null || previousLine?.changedIndex === undefined
+              ? undefined
+              : changeSteps.get(previousLine.changedIndex);
+            const startsFutureGroup = future && previousLineStep !== lineStep;
+            const futureChunk = lineStep === undefined ? undefined : replayChunks[lineStep];
+            const anchor = commentTarget(line, side);
+            const anchors = !side && line.type === "context" ? [anchor, commentTarget(line, "LEFT")] : [anchor];
+            const anchored = comments.filter((comment) => anchors.some((candidate) => !candidate.historical && comment.path === candidate.path && comment.line === candidate.line && comment.side === candidate.side));
+            const anchoredFindings = anchor.historical ? [] : findingsAtNewLine(findings, anchor.path, anchor.side === "RIGHT" ? anchor.line : null);
+            const composing = anchors.some((candidate) => target?.line === candidate.line && target.side === candidate.side && target.historical === candidate.historical);
+            return (
+              <Fragment key={`${hunk.originalIndex}-${lineIndex}`}>
+                <div className={`diff-row ${line.type} ${current ? "current" : ""} ${past ? "past-change" : ""} ${future ? "future-change" : ""}`}>
+                  {future
+                    ? <span className="future-change-gutter" />
+                    : <button className="add-comment" disabled={commentingDisabled} title={anchor.historical ? "Add a historical-line note to the review summary" : `Comment on PR line ${anchor.line}`} onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`${anchor.historical ? "Note on historical" : "Comment on"} ${side === "LEFT" ? "old " : side === "RIGHT" ? "new " : ""}line ${anchor.line}`}><span>+</span></button>}
+                  {side ? <span className="line-number">{(side === "LEFT" ? line.oldLine : line.newLine) ?? ""}</span> : <>
+                    <span className="line-number">{line.oldLine ?? ""}</span>
+                    <span className="line-number">{line.newLine ?? ""}</span>
+                  </>}
+                  {future ? (
+                    <code className="future-change-note">
+                      {startsFutureGroup && futureChunk ? (
+                        <button onClick={() => onGoToStep(lineStep, file.path)} title={`Go to Step ${lineStep + 1}: ${futureChunk.title}`}>
+                          <ArrowRight size={11} /> Later in Step {lineStep + 1} <span>· {futureChunk.title}</span>
+                        </button>
+                      ) : <span aria-hidden="true" />}
+                    </code>
+                  ) : (
+                    <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{renderCode(highlightedHunks[hunk.originalIndex]?.[lineIndex], line.text)}</code>
+                  )}
+                </div>
+                {!future && anchoredFindings.map((finding, findingIndex) => {
+                  const staged = isFindingStaged(comments, finding, [file]);
+                  return (
+                    <div className="inline-finding" key={`${finding.title}-${findingIndex}`}>
+                      <div className="inline-finding-header">
+                        <Sparkles size={13} />
+                        <span className={`severity ${finding.severity}`}>{finding.severity}</span>
+                        <span>{finding.category}</span>
+                        <strong>{finding.title}</strong>
+                        {staged
+                          ? <span className="finding-staged"><Check size={11} />Added to review</span>
+                          : <button className="finding-add" onClick={() => onAddFinding(finding)}>+ Add to review</button>}
+                      </div>
+                      <p>{finding.description}</p>
+                      {finding.suggestion && <div className="inline-finding-suggestion"><span>Suggestion</span><p>{finding.suggestion}</p></div>}
+                    </div>
+                  );
+                })}
+                {!future && anchored.map((comment) => editingCommentId === comment.id ? (
+                  <div className="inline-composer inline-comment-editor" key={comment.id}>
+                    <textarea autoFocus value={editedBody} onChange={(event) => setEditedBody(event.target.value)} onKeyDown={(event) => {
+                      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveEditedComment(); }
+                      if (event.key === "Escape") { event.preventDefault(); cancelEditing(); }
+                    }} aria-label={`Edit comment on ${file.path}:${comment.line}`} />
+                    <div><button className="text-button" onClick={cancelEditing}>Cancel</button><button className="primary-button compact" onClick={saveEditedComment} disabled={!editedBody.trim()}>Save comment</button></div>
+                  </div>
+                ) : (
+                  <div className="inline-draft" key={comment.id}>
+                    <MessageSquare size={13} /><span>{comment.body}</span><em>Pending</em>
+                    <div className="comment-actions">
+                      <button onClick={() => startEditing(comment)} aria-label="Edit pending comment" title="Edit comment"><Pencil size={12} /></button>
+                      <button className="delete" onClick={() => onDelete(comment.id)} aria-label="Delete pending comment" title="Delete comment"><Trash2 size={12} /></button>
+                    </div>
+                  </div>
+                ))}
+                {!future && composing && (
+                  <div className="inline-composer">
+                    {target?.historical && <p className="historical-comment-hint">This line is from a historical version. Your note will be included in the review summary with its file and step.</p>}
+                    <textarea autoFocus value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitComment(); } }} placeholder={`Leave a comment on ${file.path}:${target?.line}`} />
+                    <div><button className="text-button" onClick={() => { setTarget(null); setBody(""); }}>Cancel</button><button className="primary-button compact" onClick={submitComment} disabled={!body.trim()}>{target?.historical ? "Add to review summary" : "Add pending comment"}</button></div>
+                  </div>
+                )}
+              </Fragment>
+            );
+          };
+          const splitRows = diffLayout === "split" ? sideBySideRows(hunk.lines) : [];
           return (
           <Fragment key={`${file.path}-${hunk.originalIndex}`}>
             {canExpandBefore && <div className="context-expander above"><button onClick={() => void expandContext(hunk.originalIndex, "before")} disabled={expanding !== null} aria-label="Show 20 lines above" title="Show more lines above"><ChevronUp size={13} />Show 20 lines above</button></div>}
-            {contextRows(hunkBounds.first - expansion.before, hunkBounds.first - 1)}
+            {contextRows(hunkBounds.first - expansion.before, hunkBounds.first - 1, beforeOffset)}
             <div className="hunk-row"><span /><span /><code>{hunk.header}</code></div>
-            {hunk.lines.map((line, lineIndex) => {
-              const current = inRanges(fileRanges, line.changedIndex);
-              const lineStep = line.changedIndex === null ? undefined : changeSteps.get(line.changedIndex);
-              const past = !showFullDiff && lineStep !== undefined && lineStep < step;
-              const future = !showFullDiff && lineStep !== undefined && lineStep > step;
-              const previousLine = hunk.lines[lineIndex - 1];
-              const previousLineStep = previousLine?.changedIndex === null || previousLine?.changedIndex === undefined
-                ? undefined
-                : changeSteps.get(previousLine.changedIndex);
-              const startsFutureGroup = future && previousLineStep !== lineStep;
-              const futureChunk = lineStep === undefined ? undefined : replayChunks[lineStep];
-              const anchor = commentTarget(line);
-              const anchored = anchor.historical ? [] : comments.filter((comment) => comment.path === anchor.path && comment.line === anchor.line && comment.side === anchor.side);
-              const anchoredFindings = anchor.historical ? [] : findingsAtNewLine(findings, anchor.path, anchor.side === "RIGHT" ? anchor.line : null);
-              const composing = target?.line === anchor.line && target.side === anchor.side && target.historical === anchor.historical;
-              return (
-                <Fragment key={`${hunk.originalIndex}-${lineIndex}`}>
-                  <div className={`diff-row ${line.type} ${current ? "current" : ""} ${past ? "past-change" : ""} ${future ? "future-change" : ""}`}>
-                    {future
-                      ? <span className="future-change-gutter" />
-                      : <button className="add-comment" disabled={commentingDisabled} title={anchor.historical ? "Add a historical-line note to the review summary" : `Comment on PR line ${anchor.line}`} onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`${anchor.historical ? "Note on historical" : "Comment on"} line ${anchor.line}`}><span>+</span></button>}
-                    <span className="line-number">{line.oldLine ?? ""}</span>
-                    <span className="line-number">{line.newLine ?? ""}</span>
-                    {future ? (
-                      <code className="future-change-note">
-                        {startsFutureGroup && futureChunk ? (
-                          <button onClick={() => onGoToStep(lineStep, file.path)} title={`Go to Step ${lineStep + 1}: ${futureChunk.title}`}>
-                            <ArrowRight size={11} /> Later in Step {lineStep + 1} <span>· {futureChunk.title}</span>
-                          </button>
-                        ) : <span aria-hidden="true" />}
-                      </code>
-                    ) : (
-                      <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{renderCode(highlightedHunks[hunk.originalIndex]?.[hunk.sourceLines.indexOf(line)], line.text)}</code>
-                    )}
-                  </div>
-                  {!future && anchoredFindings.map((finding, findingIndex) => {
-                    const staged = isFindingStaged(comments, finding, [file]);
-                    return (
-                      <div className="inline-finding" key={`${finding.title}-${findingIndex}`}>
-                        <div className="inline-finding-header">
-                          <Sparkles size={13} />
-                          <span className={`severity ${finding.severity}`}>{finding.severity}</span>
-                          <span>{finding.category}</span>
-                          <strong>{finding.title}</strong>
-                          {staged
-                            ? <span className="finding-staged"><Check size={11} />Added to review</span>
-                            : <button className="finding-add" onClick={() => onAddFinding(finding)}>+ Add to review</button>}
-                        </div>
-                        <p>{finding.description}</p>
-                        {finding.suggestion && <div className="inline-finding-suggestion"><span>Suggestion</span><p>{finding.suggestion}</p></div>}
-                      </div>
-                    );
-                  })}
-                  {!future && anchored.map((comment) => editingCommentId === comment.id ? (
-                    <div className="inline-composer inline-comment-editor" key={comment.id}>
-                      <textarea autoFocus value={editedBody} onChange={(event) => setEditedBody(event.target.value)} onKeyDown={(event) => {
-                        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveEditedComment(); }
-                        if (event.key === "Escape") { event.preventDefault(); cancelEditing(); }
-                      }} aria-label={`Edit comment on ${file.path}:${comment.line}`} />
-                      <div><button className="text-button" onClick={cancelEditing}>Cancel</button><button className="primary-button compact" onClick={saveEditedComment} disabled={!editedBody.trim()}>Save comment</button></div>
-                    </div>
-                  ) : (
-                    <div className="inline-draft" key={comment.id}>
-                      <MessageSquare size={13} /><span>{comment.body}</span><em>Pending</em>
-                      <div className="comment-actions">
-                        <button onClick={() => startEditing(comment)} aria-label="Edit pending comment" title="Edit comment"><Pencil size={12} /></button>
-                        <button className="delete" onClick={() => onDelete(comment.id)} aria-label="Delete pending comment" title="Delete comment"><Trash2 size={12} /></button>
-                      </div>
-                    </div>
-                  ))}
-                  {!future && composing && (
-                    <div className="inline-composer">
-                      {target?.historical && <p className="historical-comment-hint">This line is from a historical version. Your note will be included in the review summary with its file and step.</p>}
-                      <textarea autoFocus value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitComment(); } }} placeholder={`Leave a comment on ${file.path}:${anchor.line}`} />
-                      <div><button className="text-button" onClick={() => { setTarget(null); setBody(""); }}>Cancel</button><button className="primary-button compact" onClick={submitComment} disabled={!body.trim()}>{target?.historical ? "Add to review summary" : "Add pending comment"}</button></div>
-                    </div>
-                  )}
-                </Fragment>
-              );
-            })}
-            {contextRows(hunkBounds.last + 1, hunkBounds.last + expansion.after)}
+            {diffLayout === "split" ? splitRows.map((row, rowIndex) => (
+              <div className="split-row" key={rowIndex}>
+                {(["left", "right"] as const).map((side) => {
+                  const index = row[side];
+                  return <div className={`split-cell ${index === null ? "split-empty" : ""}`} key={side}>
+                    {index !== null && renderLine(index, side === "left" ? "LEFT" : "RIGHT", splitRows[rowIndex - 1]?.[side] ?? null)}
+                  </div>;
+                })}
+              </div>
+            )) : hunk.lines.map((_, index) => renderLine(index))}
+            {contextRows(hunkBounds.last + 1, hunkBounds.last + expansion.after, afterOffset)}
             {canExpandAfter && <div className="context-expander below"><button onClick={() => void expandContext(hunk.originalIndex, "after")} disabled={expanding !== null} aria-label="Show 20 lines below" title="Show more lines below"><ChevronDown size={13} />Show 20 lines below</button></div>}
           </Fragment>
         );})}
@@ -707,6 +745,7 @@ function ReplayFileView({
 function RecordedReviewFile({ change, canonical, pull, step, hidden, hashCache, ...actions }: {
   change: RecordedChange; canonical?: DiffFile; pull: PullRequestDetail; step: number; hidden: boolean;
   hashCache: Map<string, Promise<string>>;
+  diffLayout: "unified" | "split";
   comments: PendingComment[]; findings: ReviewFinding[];
   onAdd: (comment: Omit<PendingComment, "id">) => void;
   onAddFinding: (finding: ReviewFinding) => void;
@@ -999,6 +1038,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const [aiReviewBusy, setAiReviewBusy] = useState(false);
   const [aiReviewError, setAiReviewError] = useState<string | null>(null);
   const [showFullDiff, setShowFullDiff] = useState(false);
+  const [diffLayout, setDiffLayout] = useState<"unified" | "split">("unified");
   // The file tab chosen for one step; any other step falls back to its first file.
   const [fileTab, setFileTab] = useState<{ step: number; file: string } | null>(null);
   const [stateReady, setStateReady] = useState(false);
@@ -1392,9 +1432,15 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                   {chunk.impactful && <span className="impact-label"><Star size={10} fill="currentColor" aria-hidden="true" />High impact</span>}
                   <code>{stepFilesLabel(chunk)}</code>
                 </div>
-                <div className="diff-scope-toggle" role="group" aria-label="Diff scope">
-                  <button className={!showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(false)} aria-pressed={!showFullDiff}>This step</button>
-                  <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>Full PR</button>
+                <div className="diff-view-controls">
+                  <div className="diff-scope-toggle" role="group" aria-label="Diff layout">
+                    <button className={diffLayout === "unified" ? "active" : ""} onClick={() => setDiffLayout("unified")} aria-pressed={diffLayout === "unified"}>Unified</button>
+                    <button className={diffLayout === "split" ? "active" : ""} onClick={() => setDiffLayout("split")} aria-pressed={diffLayout === "split"}>Side by side</button>
+                  </div>
+                  <div className="diff-scope-toggle" role="group" aria-label="Diff scope">
+                    <button className={!showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(false)} aria-pressed={!showFullDiff}>This step</button>
+                    <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>Full PR</button>
+                  </div>
                 </div>
               </div>
               <h2>{chunk.title}</h2><p>{chunk.description}</p>
@@ -1422,9 +1468,9 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                   {(recordedEvent?.omitted ?? recording.session.omitted).length > 0 && <details className="recording-review-evidence"><summary>Omitted files at this checkpoint</summary><ul>{(recordedEvent?.omitted ?? recording.session.omitted).map((entry) => <li key={entry.path}><code>{entry.path}</code> — {entry.reason}</li>)}</ul></details>}
                   {recordedEvent?.command && <details className="recording-review-evidence" open><summary>Command result · {recordedEvent.command.exitCode === 0 ? "Passed" : "Failed"}{recordedEvent.command.signal ? ` (${recordedEvent.command.signal})` : ""}</summary><pre>{recordedEvent.command.argv.map((arg) => JSON.stringify(arg)).join(" ")}</pre><pre>{recordedEvent.command.output || "(no output)"}</pre>{recordedEvent.command.truncated && <p>Output truncated by the recorder.</p>}</details>}
                   {recordedEvent && !recordedEvent.changes.length && <p className="recording-review-notice">No file changes at this checkpoint. You can add a note in the review summary or review the full PR.</p>}
-                  {recordedEvent?.changes.map((change) => <RecordedReviewFile key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} hashCache={recordingHashCache} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
+                  {recordedEvent?.changes.map((change) => <RecordedReviewFile diffLayout={diffLayout} key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} hashCache={recordingHashCache} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
                 </>}
-              </> : files.map((file) => <ReplayFileView key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
+              </> : files.map((file) => <ReplayFileView diffLayout={diffLayout} key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
             </div>
           </section>
           <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />

@@ -387,7 +387,7 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .rebuild-button { border: 0; border-left: 1px solid var(--border); background: transparent; margin-left: 8px; padding-left: 14px; color: var(--muted); font-size: 12px; cursor: pointer; }
 .rebuild-button:hover { color: var(--ink); }
 .step-narration { flex: none; padding: 14px 20px 16px; background: var(--surface-2); border-bottom: 1px solid var(--border); }
-.step-narration-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.step-narration-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 .step-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .step-meta > span:first-child { color: var(--accent); font-size: 10px; font-weight: 600; white-space: nowrap; }
 .step-meta code { color: var(--faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -397,6 +397,7 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .diff-scope-toggle { display: flex; align-items: center; flex: none; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); }
 .diff-scope-toggle button { height: 24px; border: 0; border-radius: var(--radius-sm); padding: 0 10px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
 .diff-scope-toggle button.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); font-weight: 650; }
+.diff-view-controls { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* ============================================================================
    Replay: file tabs
@@ -458,6 +459,23 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .future-change-note > button:hover { text-decoration: underline; }
 .future-change-note > button span { min-width: 0; overflow: hidden; color: var(--faint); font-weight: 500; text-overflow: ellipsis; }
 .future-change-note > span { min-height: 24px; }
+
+/* Paired rows share their height, so unequal replacements and comments stay aligned. */
+.split-heading, .split-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 720px; }
+.split-heading { background: var(--surface-2); color: var(--muted); font-size: 11px; font-weight: 600; }
+.split-heading > span { padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.split-heading > span:first-child, .split-cell:first-child { border-right: 1px solid var(--border-strong); }
+.split-cell { min-width: 0; background: var(--surface-2); border-bottom: 1px solid var(--border); }
+.split-cell .diff-row { min-width: 0; grid-template-columns: 26px 46px minmax(0, 1fr); border-bottom: 0; min-height: 100%; }
+.split-cell .diff-row:has(~ div) { min-height: 24px; }
+.split-cell .diff-row.context { background: var(--surface); }
+.split-cell .diff-row > code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.split-cell .inline-composer, .split-cell .inline-draft, .split-cell .inline-finding { padding-left: 12px; overflow-wrap: anywhere; }
+.split-empty { background: repeating-linear-gradient(135deg, transparent, transparent 4px, var(--border) 4px, var(--border) 5px) var(--surface-2); }
+.diff-table-split > .hunk-row, .diff-table-split > .context-expander { min-width: 720px; }
+.diff-table-split > .hunk-row { grid-template-columns: 26px 46px minmax(0, 1fr); }
+.diff-table-split > .hunk-row code { overflow-wrap: anywhere; }
+.add-comment:focus-visible { color: var(--surface); background: var(--accent); }
 
 /* Syntax highlighting */
 .shj-syn-cmnt { color: var(--syntax-comment); font-style: italic; }

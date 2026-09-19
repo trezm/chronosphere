@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chunkFiles, inRanges, normalizeReplayChunks, parseUnifiedDiff, replayStepMap } from "../lib/diff.ts";
+import { chunkFiles, inRanges, normalizeReplayChunks, parseUnifiedDiff, replayStepMap, sideBySideRows } from "../lib/diff.ts";
 
 const sample = `diff --git a/src/math.ts b/src/math.ts
 index 1111111..2222222 100644
@@ -134,4 +134,51 @@ test("inRanges only matches numbered lines inside a range", () => {
   assert.equal(inRanges(ranges, 9), true);
   assert.equal(inRanges(ranges, 4), false);
   assert.equal(inRanges(ranges, null), false);
+});
+
+test("pairs replacements without changing the original diff coordinates", () => {
+  const lines = parseUnifiedDiff(sample)[0].hunks[0].lines;
+  const original = structuredClone(lines);
+  assert.deepEqual(sideBySideRows(lines), [
+    { left: 0, right: 0 },
+    { left: 1, right: 2 },
+    { left: null, right: 3 },
+    { left: 4, right: 4 },
+  ]);
+  assert.deepEqual(lines, original);
+});
+
+test("keeps separate change blocks aligned with their context", () => {
+  const lines = parseUnifiedDiff(`diff --git a/a.txt b/a.txt
+@@ -1,7 +1,5 @@
+ first
+-old one
+-old two
++new one
+ middle
+-last old
++last new
+ end
+`)[0].hunks[0].lines;
+  assert.deepEqual(sideBySideRows(lines), [
+    { left: 0, right: 0 },
+    { left: 1, right: 3 },
+    { left: 2, right: null },
+    { left: 4, right: 4 },
+    { left: 5, right: 6 },
+    { left: 7, right: 7 },
+  ]);
+});
+
+test("leaves empty cells for files that only add or delete lines", () => {
+  for (const [prefix, side] of [["+", "right"], ["-", "left"]]) {
+    const lines = parseUnifiedDiff(`diff --git a/a.txt b/a.txt\n@@ -1,2 +1,2 @@\n${prefix}one\n${prefix}two\n`)[0].hunks[0].lines;
+    assert.deepEqual(sideBySideRows(lines), [0, 1].map((index) => ({ left: null, right: null, [side]: index })));
+  }
+  assert.deepEqual(sideBySideRows([]), []);
+});
+
+test("does not pair an earlier insertion with a later deletion", () => {
+  const lines = parseUnifiedDiff(`diff --git a/a.txt b/a.txt\n@@ -1,1 +1,2 @@\n+first\n-old\n+second\n`)[0].hunks[0].lines;
+  assert.deepEqual(sideBySideRows(lines), [{ left: null, right: 0 }, { left: 1, right: 2 }]);
 });

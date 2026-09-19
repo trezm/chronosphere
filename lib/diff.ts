@@ -4,6 +4,39 @@ function cleanPath(path: string): string {
   return path.replace(/^[ab]\//, "").replace(/^"|"$/g, "");
 }
 
+/** Indices into the original hunk, preserving replay and comment coordinates. */
+export interface SideBySideRow {
+  left: number | null;
+  right: number | null;
+}
+
+export function sideBySideRows(lines: readonly DiffLine[]): SideBySideRow[] {
+  const rows: SideBySideRow[] = [];
+  let deleted: number[] = [];
+  let added: number[] = [];
+  const flush = () => {
+    for (let index = 0; index < Math.max(deleted.length, added.length); index++) {
+      rows.push({ left: deleted[index] ?? null, right: added[index] ?? null });
+    }
+    deleted = [];
+    added = [];
+  };
+  lines.forEach((line, index) => {
+    if (line.type === "context") {
+      flush();
+      rows.push({ left: index, right: index });
+    } else if (line.type === "delete") {
+      // An insertion followed by a deletion starts another replacement block.
+      if (added.length) flush();
+      deleted.push(index);
+    } else {
+      added.push(index);
+    }
+  });
+  flush();
+  return rows;
+}
+
 export function parseUnifiedDiff(diff: string): DiffFile[] {
   const files: DiffFile[] = [];
   let file: DiffFile | null = null;
