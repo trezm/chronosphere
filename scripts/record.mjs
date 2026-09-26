@@ -21,7 +21,7 @@ Checkpoints observe current text files, not every intermediate edit. 'run' recor
 the command result and any file changes, and returns the command's exit status.
 Binary, symlink, sensitive-name, and >256 KB files are omitted. No uploads.
 Export copies a finished recording to .chronosphere/replay.jsonl for a PR.
-Use export --compress --out /temporary/replay.json for a gzip+Base64 gist upload.
+Use export --compress --out /temporary/replay.json for a gzip+Base64 PR comment attachment.
 `;
 
 function args(argv) {
@@ -168,7 +168,7 @@ export async function main(argv) {
     try { await durableWrite(temporary, exported, "wx"); await rename(temporary, output); }
     finally { await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
     if (options.compress) console.log(`Compressed ${Buffer.byteLength(source)} bytes to ${Buffer.byteLength(exported)} bytes (gzip+Base64).`);
-    console.log(`Exported recording for your PR:\n${output}\n${options.compress ? "Upload replay.json to the gist only after user approval." : "Commit only the exported .jsonl;"} keep raw sessions and .local.json files local.`);
+    console.log(`Exported recording for your PR:\n${output}\n${options.compress ? "Attach replay.json to a PR comment only after user approval." : "Commit only the exported .jsonl;"} keep raw sessions and .local.json files local.`);
     return 0;
   }
   if (operation === "inspect") {

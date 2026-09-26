@@ -32,9 +32,9 @@ You can also download individual skill ZIPs from [Releases](https://github.com/t
 
 Recording observes explicit checkpoints, including revisions and failed checks. Reconstruction explains verified endpoint changes in a plausible order; it does not recover the author's actual development history or invent test results. Both output Chronosphere v1 JSONL. Open the file through **Attach recording** in a PR workspace or the app's `/recordings` page. The current importer labels imported files as Recording; reconstructed files identify themselves in their title and opening explanation.
 
-No model API key or Chronosphere account is needed to generate files. Your agent supplies the reasoning and repository access. The helper scripts use standard libraries only; no package installation is required to run them. GitHub CLI is optional for the recording skill's user-approved gist-sharing workflow.
+No model API key or Chronosphere account is needed to generate files. Your agent supplies the reasoning and repository access. The helper scripts use standard libraries only; no package installation is required to run them. GitHub CLI and a browser signed in to GitHub are optional, for the recording skill's user-approved PR-comment sharing workflow.
 
-Replays include source snapshots and may include command output. Keep them local until you choose to share them. Secret GitHub gists are unlisted, not private. Raw recording sessions and their `.local.json` locator files should stay out of commits.
+Replays include source snapshots and may include command output. Keep them local until you choose to share them. Anyone who can read a PR can download a replay attached to its comments. Raw recording sessions and their `.local.json` locator files should stay out of commits.
 
 ## Development
 

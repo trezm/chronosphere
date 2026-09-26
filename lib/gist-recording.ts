@@ -1,23 +1,14 @@
 import { COMPRESSED_RECORDING_FILE, decompressRecording } from "./recording-transport.ts";
 import { readRecordingResponse } from "./pr-recording.ts";
+import { replayTags } from "./comment-recording.ts";
 
 export const GIST_RECORDING_FILE = "replay.jsonl";
 export const GIST_RECORDING_MAX_BYTES = 10 * 1024 * 1024;
 export type ReplayGist = { id: string; revision?: string; url: string };
 
-/** Only standalone tags outside Markdown code fences count as attachments. */
+/** Legacy PR-description tags; only standalone tags outside Markdown code fences count. */
 export function replayGistFromBody(body: string | null | undefined): ReplayGist | null {
-  const tags: string[] = [];
-  let fence: string | null = null;
-  for (const line of (body ?? "").split(/\r?\n/)) {
-    const delimiter = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (delimiter) {
-      if (!fence) fence = delimiter[1];
-      else if (delimiter[1][0] === fence[0] && delimiter[1].length >= fence.length && !delimiter[2].trim()) fence = null;
-      continue;
-    }
-    if (!fence && line.startsWith("chronosphere-replay:")) tags.push(line.slice("chronosphere-replay:".length).trim());
-  }
+  const tags = replayTags(body);
   if (!tags.length) return null;
   if (tags.length !== 1) throw new Error("Keep exactly one chronosphere-replay tag in the PR description.");
   // Parse the original spelling: URL normalization must not hide traversal or credentials.

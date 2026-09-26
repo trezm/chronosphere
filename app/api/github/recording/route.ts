@@ -1,3 +1,4 @@
+import { loadCommentRecording, replayFromComments, type PullComment } from "@/lib/comment-recording";
 import { loadGistRecording, replayGistFromBody } from "@/lib/gist-recording";
 import { NextRequest } from "next/server";
 import { GitHubError, githubFetch, githubJson, githubToken, jsonError, parsePullNumber, parseRepo } from "@/lib/github";
@@ -10,8 +11,17 @@ export async function GET(request: NextRequest) {
     const number = parsePullNumber(request.nextUrl.searchParams.get("number"));
     const headSha = request.nextUrl.searchParams.get("headSha");
     if (!headSha || !/^[a-f0-9]{40}$/i.test(headSha)) throw new Error("A valid PR head SHA is required.");
-    const pull = await githubJson<{ body: string | null; head: { sha: string; repo: { full_name: string } | null } }>(token, `/repos/${fullName}/pulls/${number}`);
+    const pull = await githubJson<{ body: string | null; user: { login: string } | null; head: { sha: string; repo: { full_name: string } | null } }>(token, `/repos/${fullName}/pulls/${number}`);
     if (pull.head.sha !== headSha) return Response.json({ error: "This PR changed. Reopen it before loading its recording." }, { status: 409 });
+    const comments: PullComment[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const batch = await githubJson<PullComment[]>(token, `/repos/${fullName}/issues/${number}/comments?per_page=100&page=${page}`);
+      comments.push(...batch);
+      if (batch.length < 100) break;
+    }
+    const comment = replayFromComments(comments, pull.user?.login);
+    if (comment) return Response.json({ source: await loadCommentRecording(comment, token), path: "PR comment replay", origin: "comment", url: comment.url, headSha }, { headers: { "Cache-Control": "no-store" } });
+    // Earlier replays were linked as secret gists from the PR description.
     const gist = replayGistFromBody(pull.body);
     if (gist) return Response.json({ source: await loadGistRecording(gist), path: "Gist replay", origin: "gist", url: gist.url, headSha }, { headers: { "Cache-Control": "no-store" } });
     if (!pull.head.repo) throw new Error("The PR's source repository is unavailable.");

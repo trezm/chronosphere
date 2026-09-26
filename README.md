@@ -30,17 +30,19 @@ PR replay can use an AI reconstruction or recorded workspace checkpoints with ex
 
 Open a pull request in Chronosphere. The replay source bar lets you switch between **AI synopsis** and **Recording**, or **Attach recording** from a local `.jsonl` file. Recorded steps use the same timeline, file tabs, syntax-highlighted diffs, pending comments, review submission, and merge controls as reconstructed steps. GitHub sign-in is required; OpenRouter is only needed for AI features.
 
-The recording skill first asks whether you want to share the finished replay through a **secret GitHub gist**. If you approve, it exports gzip + Base64 in `replay.json` and uploads only that compressed file and appends a final line to the PR description:
+The recording skill first asks whether you want to share the finished replay as a **PR comment attachment**. If you approve, it exports gzip + Base64 in `replay.json`, attaches only that compressed file to a new PR comment through GitHub's web comment box, and ends the comment with a tag line:
 
 ```text
-chronosphere-replay: https://gist.github.com/<owner>/<gist-id>/<revision>
+chronosphere-replay: https://github.com/user-attachments/files/<id>/replay.json
 ```
 
-A secret gist is unlisted, not private: anyone with the link can read the recording's source snapshots and command output, even if the PR is private. The skill waits for explicit consent before uploading. It pins the gist revision, preserves the existing PR description, and keeps raw sessions and locator files local. Creating gists requires an authenticated GitHub CLI with gist permission.
+GitHub has no API for comment attachments, so the upload needs a browser signed in to GitHub (the skill can drive one, or hand you the file and tag to attach yourself). Anyone who can read the PR can download the attachment. The skill waits for explicit consent before posting and keeps raw sessions and locator files local.
 
-Chronosphere recognizes one standalone tag outside code fences. The tag takes precedence over a committed replay; missing, invalid, or unavailable gist data produces an error so another recording is not silently substituted. Gists accept compressed `replay.json` or legacy plain `replay.jsonl`, with a 10 MB upload limit (GitHub's raw-file limit). Compressed envelopes declare their version, encoding, original byte count, and SHA-256 hash. Expansion is streamed and independently capped at 20 MB, then the byte count, hash, and recording contents are validated. Committed files and manual imports retain the 20 MB expanded limit; manual imports also accept compressed `replay.json`. Compression does not encrypt the recording. The app fetches gist data without sending your repository credentials to the download host.
+Chronosphere uses the newest PR comment carrying a standalone tag outside code fences, written by the PR author or a repository owner, member, or collaborator. Tags from other commenters are ignored. The comment tag takes precedence over a committed replay; an invalid or unavailable attachment produces an error so another recording is not silently substituted. Chronosphere requests the attachment from github.com with your GitHub token and downloads the signed file it redirects to without credentials. Attachments on private repositories may only be served to signed-in browsers; if Chronosphere cannot load one, commit the replay or attach it manually. Older PRs that link a secret gist from the last line of the description still load when no replay comment exists.
 
-The gist export command is:
+Attachments are limited to 10 MB compressed. Compressed envelopes declare their version, encoding, original byte count, and SHA-256 hash. Expansion is streamed and independently capped at 20 MB, then the byte count, hash, and recording contents are validated. Committed files and manual imports retain the 20 MB expanded limit; manual imports also accept compressed `replay.json`. Compression does not encrypt the recording.
+
+The compressed export command is:
 
 ```sh
 npm run record -- export --compress --session /absolute/path/to/session.jsonl --out /temporary/replay.json
@@ -57,7 +59,7 @@ git add .chronosphere/replay.jsonl
 
 Commit the exported file with your code changes. Chronosphere looks for exactly `.chronosphere/replay.jsonl` at the selected PR's head commit, including forked PRs. The exporter replaces that artifact when run again and copies only the validated, finished JSONL, never the local working-copy locator. This repository's ignore rules keep raw sessions private while allowing the exported artifact. In other repositories using a blanket `.chronosphere/` ignore, use `/.chronosphere/*` plus `!/.chronosphere/replay.jsonl` instead. The recorder excludes `.chronosphere` from capture, and the log is excluded from code reconstruction and AI review input.
 
-A manually attached file is associated with the selected PR/head for the current tab. Its source contents stay in browser memory; reattach after refreshing. The timeline metadata, current step, inline comments, and review summary use the existing per-user PR draft storage. A committed or gist-linked recording reloads from GitHub. Switching sources preserves pending comments and the review summary.
+A manually attached file is associated with the selected PR/head for the current tab. Its source contents stay in browser memory; reattach after refreshing. The timeline metadata, current step, inline comments, and review summary use the existing per-user PR draft storage. A committed or comment-attached recording reloads from GitHub. Switching sources preserves pending comments and the review summary.
 
 Inline comments are anchored only when the recorded whole-file version matches the verified PR base/head file and the line is present in GitHub's diff. Comments on earlier or discarded versions go into the review summary with their file, line, event, and step instead of being attached to an incorrect GitHub line. **Full PR** always shows the current authoritative diff. Review submission rejects a PR head that changed after opening it.
 
