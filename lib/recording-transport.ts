@@ -26,7 +26,7 @@ async function boundedBytes(stream: ReadableStream<Uint8Array>, limit: number): 
   return bytes;
 }
 
-/** A versioned text envelope keeps gzip bytes portable through gist APIs. */
+/** A versioned text envelope keeps gzip bytes portable as a text attachment. */
 export async function compressRecording(source: string): Promise<string> {
   const bytes = new TextEncoder().encode(source);
   if (bytes.byteLength > RECORDING_MAX_BYTES) throw new Error("Recording exceeds the 20 MB limit.");

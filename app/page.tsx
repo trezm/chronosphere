@@ -1008,7 +1008,7 @@ function buildStageLabel(stage: BuildStage, chars: number, model: string): strin
   return `Reconstructing — ${size} characters so far…`;
 }
 
-type RecordingAttachment = { recording: Recording; name: string; headSha: string; origin: "upload" | "repository" | "gist"; url?: string };
+type RecordingAttachment = { recording: Recording; name: string; headSha: string; origin: "upload" | "repository" | "gist" | "comment"; url?: string };
 
 function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, aiAvailable, onStepChange, onBack }: { repo: string; number: number; initialStep: number | null; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; aiAvailable: boolean; onStepChange: (step: number) => void; onBack: () => void }) {
   const [pull, setPull] = useState<PullRequestDetail | null>(null);
@@ -1097,7 +1097,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         setStateReady(true);
         setLoading(false);
         try {
-          const result = await api<{ source: string | null; path: string; headSha: string; origin: "repository" | "gist"; url?: string }>(`/api/github/recording?${new URLSearchParams({ repo, number: String(number), headSha: pull.headSha })}`);
+          const result = await api<{ source: string | null; path: string; headSha: string; origin: "repository" | "gist" | "comment"; url?: string }>(`/api/github/recording?${new URLSearchParams({ repo, number: String(number), headSha: pull.headSha })}`);
           if (result.source !== null) {
             const recording = await parseRecording(result.source);
             if (!active) return;
@@ -1362,13 +1362,13 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         </div>
         <button className="secondary-button compact" disabled={building || recordingBusy} onClick={() => recordingInputRef.current?.click()}><FileUp size={14} />{recordingBusy ? "Checking recording…" : "Attach recording"}</button>
         {linkedRecording && attachment?.origin === "upload" && <button className="text-button" onClick={() => selectRecording(linkedRecording)}>Use PR recording</button>}
-        <span>{isRecorded ? replay.recordingName : linkedRecording ? "Recording found in this PR" : `Link a gist, commit ${PR_RECORDING_PATH}, or attach a file`}</span>
+        <span>{isRecorded ? replay.recordingName : linkedRecording ? "Recording found in this PR" : `Attach replay.json in a PR comment, commit ${PR_RECORDING_PATH}, or attach a file`}</span>
         {!aiAvailable && <a href="/api/auth/openrouter">Connect OpenRouter for AI</a>}
         <input ref={recordingInputRef} type="file" accept=".jsonl,.json,application/json,application/x-ndjson" hidden aria-label="Attach recording to this PR" onChange={(event) => { void importRecording(event.target.files?.[0]); event.target.value = ""; }} />
       </div>
       {recordingError && <div className="error-banner" role="alert">{recordingError}</div>}
       {isRecorded && <div className="recording-review-notice">
-        {recording ? <>Recorded checkpoints · {attachment?.origin === "gist" ? <a href={attachment.url} target="_blank" rel="noreferrer">Gist linked in this PR</a> : attachment?.origin === "repository" ? `From this PR at ${pull.headSha.slice(0, 8)}` : "Attached to this PR for this tab; reattach after refreshing"}. Matching PR lines receive inline comments; historical-line notes go into the review summary.</> : <>Reattach <strong>{replay.recordingName}</strong> to resume recorded playback. Your review is restored; the full PR diff is still available.</>}
+        {recording ? <>Recorded checkpoints · {attachment?.origin === "comment" ? <a href={attachment.url} target="_blank" rel="noreferrer">Attached in a PR comment</a> : attachment?.origin === "gist" ? <a href={attachment.url} target="_blank" rel="noreferrer">Gist linked in this PR</a> : attachment?.origin === "repository" ? `From this PR at ${pull.headSha.slice(0, 8)}` : "Attached to this PR for this tab; reattach after refreshing"}. Matching PR lines receive inline comments; historical-line notes go into the review summary.</> : <>Reattach <strong>{replay.recordingName}</strong> to resume recorded playback. Your review is restored; the full PR diff is still available.</>}
       </div>}
       {!replay ? (
         <section className="build-replay">

@@ -51,4 +51,4 @@ If Python execution is unavailable, use the equivalent algorithm in the format r
 
 Return the actual `replay.jsonl` file, identify the pinned PR/head, summarize the steps and omissions, and say that the sequence is inferred. The current v1 importer places it under **Recording** / **Attach recording** (or `/recordings`); the artifact's title and opening explanation explicitly identify it as reconstructed. It does not replace the app's built-in AI synopsis.
 
-Keep generation local unless the user requests sharing. Uploading a gist, editing a PR description, or committing `.chronosphere/replay.jsonl` is a separate action. This skill does not require the live recording skill or a `.local.json` companion.
+Keep generation local unless the user requests sharing. Posting a PR comment with the replay attached, or committing `.chronosphere/replay.jsonl` is a separate action. This skill does not require the live recording skill or a `.local.json` companion.
