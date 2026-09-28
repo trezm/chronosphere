@@ -31,14 +31,15 @@ import {
   Star,
   Sun,
   Trash2,
+  TriangleAlert,
   UserRoundCheck,
   XCircle,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { contentHash, parseRecording, RECORDING_MAX_BYTES, type RecordedChange, type Recording } from "@/lib/recording";
-import { historicalReviewNote, recordedChangeDiff, recordedLineAnchor, recordingReplay, type ReviewAnchor } from "@/lib/recording-review";
+import { parseRecording, RECORDING_MAX_BYTES, type RecordedChange, type Recording } from "@/lib/recording";
+import { finalLineMaps, historicalReviewNote, recordedChangeDiff, recordedLineAnchor, recordingReplay, type FinalLineMaps, type ReviewAnchor } from "@/lib/recording-review";
 import { PR_RECORDING_PATH } from "@/lib/pr-recording";
 import { api, authorizedFetch, onGithubSessionExpired } from "@/lib/api";
 import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap, sideBySideRows } from "@/lib/diff";
@@ -654,7 +655,7 @@ function ReplayFileView({
                 <div className={`diff-row ${line.type} ${current ? "current" : ""} ${past ? "past-change" : ""} ${future ? "future-change" : ""}`}>
                   {future
                     ? <span className="future-change-gutter" />
-                    : <button className="add-comment" disabled={commentingDisabled} title={anchor.historical ? "Add a historical-line note to the review summary" : `Comment on PR line ${anchor.line}`} onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`${anchor.historical ? "Note on historical" : "Comment on"} ${side === "LEFT" ? "old " : side === "RIGHT" ? "new " : ""}line ${anchor.line}`}><span>+</span></button>}
+                    : <button className="add-comment" disabled={commentingDisabled} title={anchor.historical ? "This line changes before the final PR; a note will go into the review summary" : `Comment on PR line ${anchor.line}`} onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`${anchor.historical ? "Note on historical" : "Comment on"} ${side === "LEFT" ? "old " : side === "RIGHT" ? "new " : ""}line ${anchor.line}`}><span>+</span></button>}
                   {side ? <span className="line-number">{(side === "LEFT" ? line.oldLine : line.newLine) ?? ""}</span> : <>
                     <span className="line-number">{line.oldLine ?? ""}</span>
                     <span className="line-number">{line.newLine ?? ""}</span>
@@ -708,7 +709,7 @@ function ReplayFileView({
                 ))}
                 {!future && composing && (
                   <div className="inline-composer">
-                    {target?.historical && <p className="historical-comment-hint">This line is from a historical version. Your note will be included in the review summary with its file and step.</p>}
+                    {target?.historical && <p className="historical-comment-hint"><TriangleAlert size={13} />This line changes before the final PR (or isn&apos;t in its diff), so GitHub can&apos;t place a comment on it. Your note will be added to the review summary with its file and step instead.</p>}
                     <textarea autoFocus value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitComment(); } }} placeholder={`Leave a comment on ${file.path}:${target?.line}`} />
                     <div><button className="text-button" onClick={() => { setTarget(null); setBody(""); }}>Cancel</button><button className="primary-button compact" onClick={submitComment} disabled={!body.trim()}>{target?.historical ? "Add to review summary" : "Add pending comment"}</button></div>
                   </div>
@@ -742,9 +743,9 @@ function ReplayFileView({
   );
 }
 
-function RecordedReviewFile({ change, canonical, pull, step, hidden, hashCache, ...actions }: {
+function RecordedReviewFile({ change, canonical, pull, step, hidden, contentCache, ...actions }: {
   change: RecordedChange; canonical?: DiffFile; pull: PullRequestDetail; step: number; hidden: boolean;
-  hashCache: Map<string, Promise<string>>;
+  contentCache: Map<string, Promise<string>>;
   diffLayout: "unified" | "split";
   comments: PendingComment[]; findings: ReviewFinding[];
   onAdd: (comment: Omit<PendingComment, "id">) => void;
@@ -754,32 +755,35 @@ function RecordedReviewFile({ change, canonical, pull, step, hidden, hashCache, 
   onHistoricalComment: (line: number, side: "LEFT" | "RIGHT", body: string) => void;
 }) {
   const file = useMemo(() => recordedChangeDiff(change), [change]);
-  const [verified, setVerified] = useState<{ baseHash?: string; headHash?: string } | null>(null);
+  const [lineMaps, setLineMaps] = useState<FinalLineMaps | null>(null);
   const [verificationError, setVerificationError] = useState(false);
   useEffect(() => {
     if (hidden) return;
     let active = true;
-    async function hash(repo: string, ref: string, path: string) {
+    async function content(repo: string, ref: string, path: string) {
       const query = new URLSearchParams({ repo, ref, path }).toString();
-      if (!hashCache.has(query)) hashCache.set(query, api<{ content: string }>(`/api/github/file?${query}`).then(({ content }) => contentHash(content)).catch((error) => { hashCache.delete(query); throw error; }));
-      return hashCache.get(query)!;
+      if (!contentCache.has(query)) contentCache.set(query, api<{ content: string }>(`/api/github/file?${query}`).then(({ content }) => content).catch((error) => { contentCache.delete(query); throw error; }));
+      return contentCache.get(query)!;
     }
     const check = async () => {
-      if (!canonical) { if (active) setVerified({}); return; }
+      if (!canonical) { if (active) setLineMaps({}); return; }
       const results = await Promise.allSettled([
-        canonical.status !== "added" ? hash(pull.baseRepo, pull.baseSha, canonical.oldPath ?? canonical.path) : Promise.resolve(undefined),
-        canonical.status !== "deleted" ? hash(pull.headRepo, pull.headSha, canonical.path) : Promise.resolve(undefined),
+        canonical.status !== "added" ? content(pull.baseRepo, pull.baseSha, canonical.oldPath ?? canonical.path) : Promise.resolve(undefined),
+        canonical.status !== "deleted" ? content(pull.headRepo, pull.headSha, canonical.path) : Promise.resolve(undefined),
       ]);
       if (!active) return;
-      setVerified({ baseHash: results[0].status === "fulfilled" ? results[0].value : undefined, headHash: results[1].status === "fulfilled" ? results[1].value : undefined });
+      setLineMaps(finalLineMaps(change, {
+        base: results[0].status === "fulfilled" ? results[0].value : undefined,
+        head: results[1].status === "fulfilled" ? results[1].value : undefined,
+      }));
       setVerificationError(results.some((result) => result.status === "rejected"));
     };
     void check();
     return () => { active = false; };
-  }, [canonical, hashCache, hidden, pull.baseRepo, pull.baseSha, pull.headRepo, pull.headSha]);
+  }, [canonical, change, contentCache, hidden, pull.baseRepo, pull.baseSha, pull.headRepo, pull.headSha]);
   return <div hidden={hidden}>
     {verificationError && <p className="recording-review-notice">PR line verification is unavailable for this file. Comments will be added to the review summary.</p>}
-    {!file.hunks.length ? <p className="recording-review-notice"><code>{change.path}</code>: {file.status}; no visible line changes (empty file or line-ending change).</p> : <ReplayFileView {...actions} file={file} step={step} currentRanges={[{ file: file.path, start: 1, end: file.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.changedIndex !== null).length }]} replayChunks={[]} changeSteps={new Map()} showFullDiff contentRepo="" contentRef="" localContent={change.after?.content ?? change.before?.content ?? ""} resolveComment={(line) => recordedLineAnchor(change, line, canonical, verified ?? {})} commentingDisabled={verified === null} />}
+    {!file.hunks.length ? <p className="recording-review-notice"><code>{change.path}</code>: {file.status}; no visible line changes (empty file or line-ending change).</p> : <ReplayFileView {...actions} file={file} step={step} currentRanges={[{ file: file.path, start: 1, end: file.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.changedIndex !== null).length }]} replayChunks={[]} changeSteps={new Map()} showFullDiff contentRepo="" contentRef="" localContent={change.after?.content ?? change.before?.content ?? ""} resolveComment={(line) => recordedLineAnchor(line, canonical, lineMaps ?? {})} commentingDisabled={lineMaps === null} />}
   </div>;
 }
 
@@ -1018,7 +1022,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const [recordingBusy, setRecordingBusy] = useState(true);
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const recordingInputRef = useRef<HTMLInputElement>(null);
-  const [recordingHashCache] = useState(() => new Map<string, Promise<string>>());
+  const [recordingContentCache] = useState(() => new Map<string, Promise<string>>());
   const aiReplayRef = useRef<ReplayResult | null>(null);
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -1468,7 +1472,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                   {(recordedEvent?.omitted ?? recording.session.omitted).length > 0 && <details className="recording-review-evidence"><summary>Omitted files at this checkpoint</summary><ul>{(recordedEvent?.omitted ?? recording.session.omitted).map((entry) => <li key={entry.path}><code>{entry.path}</code> — {entry.reason}</li>)}</ul></details>}
                   {recordedEvent?.command && <details className="recording-review-evidence" open><summary>Command result · {recordedEvent.command.exitCode === 0 ? "Passed" : "Failed"}{recordedEvent.command.signal ? ` (${recordedEvent.command.signal})` : ""}</summary><pre>{recordedEvent.command.argv.map((arg) => JSON.stringify(arg)).join(" ")}</pre><pre>{recordedEvent.command.output || "(no output)"}</pre>{recordedEvent.command.truncated && <p>Output truncated by the recorder.</p>}</details>}
                   {recordedEvent && !recordedEvent.changes.length && <p className="recording-review-notice">No file changes at this checkpoint. You can add a note in the review summary or review the full PR.</p>}
-                  {recordedEvent?.changes.map((change) => <RecordedReviewFile diffLayout={diffLayout} key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} hashCache={recordingHashCache} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
+                  {recordedEvent?.changes.map((change) => <RecordedReviewFile diffLayout={diffLayout} key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} contentCache={recordingContentCache} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
                 </>}
               </> : files.map((file) => <ReplayFileView diffLayout={diffLayout} key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
             </div>
