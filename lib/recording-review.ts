@@ -44,24 +44,74 @@ export function recordedChangeDiff(change: RecordedChange): DiffFile {
   };
 }
 
-/** Anchor only verified whole-file versions, and only lines present in the PR diff. */
-export function recordedLineAnchor(
-  change: RecordedChange, line: DiffLine, canonical: DiffFile | undefined,
-  verified: { baseHash?: string; headHash?: string },
-): ReviewAnchor | null {
+/**
+ * Map each line of `a` to its matching line in `b` (or -1) using a Myers line diff.
+ * Returns null when the files differ by more than `maxEdits` lines, rather than guessing.
+ */
+export function lineMatches(a: readonly string[], b: readonly string[], maxEdits = 2000): Int32Array | null {
+  const map = new Int32Array(a.length).fill(-1);
+  let start = 0, endA = a.length, endB = b.length;
+  while (start < endA && start < endB && a[start] === b[start]) { map[start] = start; start++; }
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) map[--endA] = --endB;
+  const n = endA - start, m = endB - start;
+  if (!n || !m) return map;
+  const offset = n + m;
+  const v = new Int32Array(2 * offset + 2);
+  const trace: Int32Array[] = [];
+  let edits = -1;
+  for (let d = 0; d <= Math.min(n + m, maxEdits) && edits < 0; d++) {
+    trace.push(v.slice(offset - d, offset + d + 1));
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1]) ? v[offset + k + 1] : v[offset + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[start + x] === b[start + y]) { x++; y++; }
+      v[offset + k] = x;
+      if (x >= n && y >= m) { edits = d; break; }
+    }
+  }
+  if (edits < 0) return null;
+  let x = n, y = m;
+  for (let d = edits; d > 0; d--) {
+    const previous = trace[d], at = (k: number) => previous[k + d];
+    const k = x - y;
+    const previousK = k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
+    const previousX = at(previousK), previousY = previousX - previousK;
+    while (x > previousX && y > previousY) { x--; y--; map[start + x] = start + y; }
+    x = previousX; y = previousY;
+  }
+  while (x > 0 && y > 0) { x--; y--; map[start + x] = start + y; }
+  return map;
+}
+
+/** Line correspondences from a recorded checkpoint to the PR's final base and head files. */
+export interface FinalLineMaps { before?: Int32Array | null; after?: Int32Array | null }
+
+export function finalLineMaps(change: RecordedChange, final: { base?: string; head?: string }): FinalLineMaps {
+  return {
+    before: change.before && final.base !== undefined ? lineMatches(lines(change.before.content), lines(final.base)) : null,
+    after: change.after && final.head !== undefined ? lineMatches(lines(change.after.content), lines(final.head)) : null,
+  };
+}
+
+/**
+ * Anchor a recorded line inline when it survives unchanged into the final PR: an after-side line
+ * that is still present in the head file, or a before-side line that is the base file's own line.
+ * The mapped line must also appear in the PR diff, since GitHub only accepts comments there.
+ */
+export function recordedLineAnchor(line: DiffLine, canonical: DiffFile | undefined, maps: FinalLineMaps): ReviewAnchor | null {
   if (!canonical) return null;
   const candidates = canonical.hunks.flatMap((hunk) => hunk.lines);
-  if (line.type !== "delete" && line.newLine !== null && change.after?.sha256 === verified.headHash
-    && candidates.some((row) => row.newLine === line.newLine && row.type !== "delete" && row.text === line.text)) {
-    return { path: canonical.path, line: line.newLine, side: "RIGHT" };
+  const head = line.type !== "delete" && line.newLine !== null ? maps.after?.[line.newLine - 1] ?? -1 : -1;
+  if (head >= 0 && candidates.some((row) => row.newLine === head + 1 && row.type !== "delete" && row.text === line.text)) {
+    return { path: canonical.path, line: head + 1, side: "RIGHT" };
   }
-  if (line.type !== "add" && line.oldLine !== null && change.before?.sha256 === verified.baseHash
-    && candidates.some((row) => row.oldLine === line.oldLine && row.type !== "add" && row.text === line.text)) {
-    return { path: canonical.path, line: line.oldLine, side: "LEFT" };
+  const base = line.type !== "add" && line.oldLine !== null ? maps.before?.[line.oldLine - 1] ?? -1 : -1;
+  if (base >= 0 && candidates.some((row) => row.oldLine === base + 1 && row.type !== "add" && row.text === line.text)) {
+    return { path: canonical.path, line: base + 1, side: "LEFT" };
   }
   return null;
 }
 
 export function historicalReviewNote(event: Pick<RecordingEvent, "title" | "sequence" | "id">, path: string, line: number, side: string, body: string): string {
-  return `Recorded step ${event.sequence}: ${event.title}\nFile: ${path}:${line} (${side === "LEFT" ? "before" : "after"}; historical version, event ${event.id})\n\n${body.trim()}`;
+  return `Recorded step ${event.sequence}: ${event.title}\nFile: ${path}:${line} (${side === "LEFT" ? "before" : "after"}; historical version, event ${event.id})\n> ⚠️ This line does not appear unchanged in the final PR diff, so this comment could not be placed inline.\n\n${body.trim()}`;
 }

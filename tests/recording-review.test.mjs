@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { contentHash, parseRecording } from "../lib/recording.ts";
-import { historicalReviewNote, recordedChangeDiff, recordedLineAnchor, recordingReplay } from "../lib/recording-review.ts";
+import { finalLineMaps, historicalReviewNote, lineMatches, recordedChangeDiff, recordedLineAnchor, recordingReplay } from "../lib/recording-review.ts";
 import { parseUnifiedDiff } from "../lib/diff.ts";
 import { isReplay, loadInProgressReview, saveInProgressReview } from "../lib/review-cache.ts";
 import { isPullRequestState } from "../lib/review-state.ts";
@@ -30,27 +30,54 @@ test("recorded file replacements render additions, removals and context with the
   assert.equal(recordedChangeDiff({ path: "empty", before: null, after: await file("") }).hunks.length, 0);
 });
 
-test("inline comments require a verified PR file version and an actual diff line", async () => {
-  const change = { path: "math.js", before: await file("export function total(values) {\n  return values.length;\n}\n"), after: await file("export function total(values) {\n  const count = values.reduce((a, b) => a + b, 0);\n  return count;\n}\n") };
+test("line matching pairs unchanged lines across edits and gives up past the edit budget", () => {
+  assert.deepEqual([...lineMatches(["a", "b", "c", "d"], ["a", "x", "c", "d", "e"])], [0, -1, 2, 3]);
+  assert.deepEqual([...lineMatches(["a", "b"], ["z", "a", "b"])], [1, 2]);
+  assert.deepEqual([...lineMatches(["q", "a", "r", "b", "s"], ["a", "b"])], [-1, 0, -1, 1, -1]);
+  assert.deepEqual([...lineMatches([], ["a"])], []);
+  assert.deepEqual([...lineMatches(["a"], [])], [-1]);
+  assert.equal(lineMatches(["a", "b", "c"], ["x", "y", "z"], 2), null);
+});
+
+test("inline comments anchor recorded lines that survive unchanged into the final PR diff", async () => {
+  const base = "export function total(values) {\n  return values.length;\n}\n";
+  const head = "export function total(values) {\n  const count = values.reduce((a, b) => a + b, 0);\n  return count;\n}\n";
   const canonical = parseUnifiedDiff(canonicalDiff)[0];
-  const rows = recordedChangeDiff(change).hunks[0].lines;
-  const added = rows.find((row) => row.type === "add");
-  const deleted = rows.find((row) => row.type === "delete");
-  const hashes = { baseHash: change.before.sha256, headHash: change.after.sha256 };
-  assert.deepEqual(recordedLineAnchor(change, added, canonical, hashes), { path: "math.js", line: 2, side: "RIGHT" });
-  assert.deepEqual(recordedLineAnchor(change, deleted, canonical, hashes), { path: "math.js", line: 2, side: "LEFT" });
-  assert.equal(recordedLineAnchor(change, added, canonical, {}), null);
-  assert.equal(recordedLineAnchor(change, added, canonical, { headHash: "different version" }), null);
-  assert.equal(recordedLineAnchor(change, { ...added, newLine: 88 }, canonical, hashes), null);
-  assert.equal(recordedLineAnchor(change, { ...added, text: "different text" }, canonical, hashes), null);
-  assert.equal(recordedLineAnchor(change, added, undefined, hashes), null);
-  assert.deepEqual(recordedLineAnchor(change, deleted, { ...canonical, path: "renamed.js", oldPath: "math.js" }, hashes), { path: "renamed.js", line: 2, side: "LEFT" });
+  const exact = { path: "math.js", before: await file(base), after: await file(head) };
+  const exactRows = recordedChangeDiff(exact).hunks[0].lines;
+  const added = exactRows.find((row) => row.type === "add");
+  const deleted = exactRows.find((row) => row.type === "delete");
+  const maps = finalLineMaps(exact, { base, head });
+  assert.deepEqual(recordedLineAnchor(added, canonical, maps), { path: "math.js", line: 2, side: "RIGHT" });
+  assert.deepEqual(recordedLineAnchor(deleted, canonical, maps), { path: "math.js", line: 2, side: "LEFT" });
+  assert.equal(recordedLineAnchor(added, canonical, {}), null);
+  assert.equal(recordedLineAnchor(added, undefined, maps), null);
+  assert.deepEqual(recordedLineAnchor(deleted, { ...canonical, path: "renamed.js", oldPath: "math.js" }, maps), { path: "renamed.js", line: 2, side: "LEFT" });
+
+  // An intermediate checkpoint: the file differs from the final head, but lines kept later still anchor.
+  const draft = "// TODO\nexport function total(values) {\n  const count = values.reduce((a, b) => a + b, 0);\n  console.log(count);\n  return count;\n}\n";
+  const step = { path: "math.js", before: await file(base), after: await file(draft) };
+  const stepMaps = finalLineMaps(step, { base, head });
+  const stepRows = recordedChangeDiff(step).hunks[0].lines;
+  const kept = stepRows.find((row) => row.type === "add" && row.text.includes("reduce"));
+  const laterRemoved = stepRows.find((row) => row.type === "add" && row.text.includes("console.log"));
+  const shifted = stepRows.find((row) => row.type === "add" && row.text === "  return count;");
+  assert.deepEqual(recordedLineAnchor(kept, canonical, stepMaps), { path: "math.js", line: 2, side: "RIGHT" });
+  assert.deepEqual(recordedLineAnchor(shifted, canonical, stepMaps), { path: "math.js", line: 3, side: "RIGHT" });
+  assert.equal(recordedLineAnchor(laterRemoved, canonical, stepMaps), null);
+  assert.equal(recordedLineAnchor(stepRows.find((row) => row.text === "// TODO"), canonical, stepMaps), null);
+
+  // A line deleted from something an earlier step wrote was never in the PR base.
+  const revert = { path: "math.js", before: await file(draft), after: await file(head) };
+  const revertRows = recordedChangeDiff(revert).hunks[0].lines;
+  assert.equal(recordedLineAnchor(revertRows.find((row) => row.type === "delete" && row.text.includes("console.log")), canonical, finalLineMaps(revert, { base, head })), null);
 });
 
 test("historical notes preserve the recording location without pretending to have a GitHub anchor", () => {
   const note = historicalReviewNote({ id: "event-1", sequence: 4, title: "Try a cache" }, "cache.js", 8, "RIGHT", "Please explain this choice.");
   assert.match(note, /Recorded step 4: Try a cache/);
   assert.match(note, /cache.js:8 \(after; historical version, event event-1\)/);
+  assert.match(note, /could not be placed inline/);
   assert.match(note, /Please explain this choice/);
 });
 

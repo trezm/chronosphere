@@ -10,7 +10,8 @@
 .recording-review-evidence summary { cursor: pointer; font-weight: 600; }
 .recording-review-evidence pre { overflow: auto; max-height: 260px; font: 13px/1.6 var(--font-mono), monospace; }
 .recording-review-evidence li { overflow-wrap: anywhere; }
-.historical-comment-hint { margin: 0 0 8px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.historical-comment-hint { display: flex; gap: 6px; align-items: flex-start; margin: 0 0 8px; color: var(--amber); font-size: 14px; line-height: 1.5; }
+.historical-comment-hint svg { flex: none; margin-top: 4px; }
 
 /* ============================================================================
    Design tokens
