@@ -2,6 +2,23 @@ import type { DiffFile, PendingComment, ReviewFinding } from "./types";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low"] as const;
 
+/** Stable, URL-safe target for a new-side line, unique across files in the diff. */
+export function diffLineAnchorId(path: string, line: number): string {
+  return `diff-line-${encodeURIComponent(path).replace(/_/g, "%5F").replace(/%/g, "_")}-R${line}`;
+}
+
+export function parseDiffLineAnchor(hash: string): { path: string; line: number } | null {
+  try {
+    const id = decodeURIComponent(hash.replace(/^#/, ""));
+    const match = /^diff-line-(.+)-R([1-9]\d*)$/.exec(id);
+    if (!match) return null;
+    const line = Number(match[2]);
+    return Number.isSafeInteger(line) ? { path: decodeURIComponent(match[1].replace(/_/g, "%")), line } : null;
+  } catch {
+    return null;
+  }
+}
+
 export function sortFindings(findings: ReviewFinding[]): ReviewFinding[] {
   return [...findings].sort((left, right) => {
     const severity = SEVERITY_ORDER.indexOf(left.severity) - SEVERITY_ORDER.indexOf(right.severity);
@@ -22,7 +39,7 @@ export function findingToCommentBody(finding: ReviewFinding): string {
   return sections.join("\n").trim();
 }
 
-export function findingAnchor(files: DiffFile[], finding: ReviewFinding): {
+export function findingAnchor(files: DiffFile[], finding: Pick<ReviewFinding, "file" | "line">): {
   path: string;
   line: number;
   side: "RIGHT";

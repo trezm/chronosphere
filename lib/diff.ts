@@ -37,6 +37,21 @@ export function sideBySideRows(lines: readonly DiffLine[]): SideBySideRow[] {
   return rows;
 }
 
+/** In a step-scoped diff, unchanged context and this step's changes remain visible. */
+export function stepLineVisible(line: DiffLine, ranges: readonly ReplayRange[]): boolean {
+  return line.changedIndex === null || inRanges(ranges, line.changedIndex);
+}
+
+/** Keep original hunk indexes so comments and syntax tokens still use PR coordinates. */
+export function sideBySideStepRows(lines: readonly DiffLine[], ranges: readonly ReplayRange[]): SideBySideRow[] {
+  return sideBySideRows(lines)
+    .map((row) => ({
+      left: row.left !== null && stepLineVisible(lines[row.left], ranges) ? row.left : null,
+      right: row.right !== null && stepLineVisible(lines[row.right], ranges) ? row.right : null,
+    }))
+    .filter((row) => row.left !== null || row.right !== null);
+}
+
 export function parseUnifiedDiff(diff: string): DiffFile[] {
   const files: DiffFile[] = [];
   let file: DiffFile | null = null;

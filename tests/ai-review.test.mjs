@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeFindings, normalizeScout } from "../lib/ai-review-normalize.ts";
-import { findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, sortFindings } from "../lib/review-findings.ts";
+import { diffLineAnchorId, findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, parseDiffLineAnchor, sortFindings } from "../lib/review-findings.ts";
 import { parseUnifiedDiff } from "../lib/diff.ts";
 
 const paths = new Set(["src/math.ts"]);
@@ -57,4 +57,15 @@ test("anchors findings only when the new line is present in the diff", () => {
   assert.equal(findingAnchor(files, {
     file: "src/math.ts", line: 99, severity: "high", category: "correctness", title: "Finding", description: "Description", suggestion: "Suggestion",
   }), null);
+});
+
+test("line anchors round-trip unusual paths and reject invalid fragments", () => {
+  const path = "src/a_b/file #1 (雪).ts";
+  const id = diffLineAnchorId(path, 42);
+  assert.equal(parseDiffLineAnchor(`#${encodeURIComponent(id)}`)?.path, path);
+  assert.deepEqual(parseDiffLineAnchor(`#${encodeURIComponent(id)}`), { path, line: 42 });
+  assert.notEqual(diffLineAnchorId("src/a_b.ts", 42), diffLineAnchorId("src/a/b.ts", 42));
+  assert.equal(parseDiffLineAnchor("#diff-line-src_2Ftest.ts-R0"), null);
+  assert.equal(parseDiffLineAnchor("#diff-line-src_2Ftest.ts-R99999999999999999999"), null);
+  assert.equal(parseDiffLineAnchor("#diff-line-bad_XX-R3"), null);
 });

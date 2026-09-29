@@ -431,6 +431,7 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .diff-table { overflow-x: auto; }
 .diff-row, .hunk-row, .context-expander { min-width: 620px; display: grid; grid-template-columns: 26px 46px 46px minmax(480px, 1fr); position: relative; border-bottom: 1px solid var(--border); }
 .diff-row { min-height: 24px; align-items: stretch; font: 400 12px/1.7 var(--font-mono), monospace; }
+.diff-row:target { z-index: 1; outline: 2px solid var(--accent); outline-offset: -2px; }
 .hunk-row { grid-template-columns: 26px 92px minmax(480px, 1fr); background: var(--accent-soft); color: var(--accent); min-height: 28px; align-items: center; font-size: 11px; }
 .hunk-row code { padding-left: 12px; }
 .context-expander { display: flex; justify-content: center; min-height: 30px; padding: 3px; background: var(--green-soft); }
@@ -452,15 +453,6 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .context-gutter { border-right: 1px solid var(--border); }
 .expanded-context { background: var(--surface-2); }
 .context-error { padding: 8px 12px; border-top: 1px solid var(--red-border); background: var(--red-soft); color: var(--red); font-size: 12px; }
-.diff-row.future-change { background: var(--surface-2); }
-.future-change-gutter { border-right: 1px solid var(--border); }
-.diff-row.future-change .line-number { color: var(--border-strong); }
-.diff-row > code.future-change-note { display: flex; align-items: center; padding-top: 0; padding-bottom: 0; color: var(--faint); }
-.future-change-note > button { height: 100%; min-width: 0; max-width: 100%; display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; padding: 0; color: var(--accent); font: 600 11px var(--font-mono), monospace; cursor: pointer; }
-.future-change-note > button:hover { text-decoration: underline; }
-.future-change-note > button span { min-width: 0; overflow: hidden; color: var(--faint); font-weight: 500; text-overflow: ellipsis; }
-.future-change-note > span { min-height: 24px; }
-
 /* Paired rows share their height, so unequal replacements and comments stay aligned. */
 .split-heading, .split-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 720px; }
 .split-heading { background: var(--surface-2); color: var(--muted); font-size: 11px; font-weight: 600; }
@@ -565,6 +557,8 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .finding-jump { width: 100%; border: 0; background: transparent; padding: 8px 0 0; display: flex; flex-direction: column; gap: 3px; text-align: left; cursor: pointer; }
 .finding-jump strong { color: var(--ink); font-size: 12px; line-height: 1.4; }
 .finding-jump:hover strong { color: var(--accent); }
+.finding-jump:disabled { cursor: default; }
+.finding-jump:disabled:hover strong { color: var(--ink); }
 .finding-jump code { overflow: hidden; color: var(--faint); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .finding-card > p, .finding-suggestion p { margin: 8px 0; color: var(--muted); font-size: 11px; line-height: 1.5; white-space: pre-wrap; }
 .finding-suggestion { border-left: 2px solid var(--green-border); padding-left: 8px; }

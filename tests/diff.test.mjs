@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chunkFiles, inRanges, normalizeReplayChunks, parseUnifiedDiff, replayStepMap, sideBySideRows } from "../lib/diff.ts";
+import { chunkFiles, inRanges, normalizeReplayChunks, parseUnifiedDiff, replayStepMap, sideBySideRows, sideBySideStepRows, stepLineVisible } from "../lib/diff.ts";
 
 const sample = `diff --git a/src/math.ts b/src/math.ts
 index 1111111..2222222 100644
@@ -146,6 +146,25 @@ test("pairs replacements without changing the original diff coordinates", () => 
     { left: 4, right: 4 },
   ]);
   assert.deepEqual(lines, original);
+});
+
+test("a step shows its changes and context without changes assigned to other steps", () => {
+  const lines = parseUnifiedDiff(sample)[0].hunks[0].lines;
+  const firstStep = [{ file: "src/math.ts", start: 1, end: 1 }];
+  const secondStep = [{ file: "src/math.ts", start: 2, end: 2 }];
+
+  assert.deepEqual(lines.map((line) => stepLineVisible(line, firstStep)), [true, true, false, false, true]);
+  assert.deepEqual(sideBySideStepRows(lines, firstStep), [
+    { left: 0, right: 0 },
+    { left: 1, right: null },
+    { left: 4, right: 4 },
+  ]);
+  assert.deepEqual(sideBySideStepRows(lines, secondStep), [
+    { left: 0, right: 0 },
+    { left: null, right: 2 },
+    { left: 4, right: 4 },
+  ]);
+  assert.deepEqual(sideBySideRows(lines)[1], { left: 1, right: 2 });
 });
 
 test("keeps separate change blocks aligned with their context", () => {

@@ -42,10 +42,10 @@ import { parseRecording, RECORDING_MAX_BYTES, type RecordedChange, type Recordin
 import { finalLineMaps, historicalReviewNote, recordedChangeDiff, recordedLineAnchor, recordingReplay, type FinalLineMaps, type ReviewAnchor } from "@/lib/recording-review";
 import { PR_RECORDING_PATH } from "@/lib/pr-recording";
 import { api, authorizedFetch, onGithubSessionExpired } from "@/lib/api";
-import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap, sideBySideRows } from "@/lib/diff";
+import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap, sideBySideRows, sideBySideStepRows, stepLineVisible } from "@/lib/diff";
 import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
 import { readReplayEvents } from "@/lib/replay-stream";
-import { findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, sortFindings } from "@/lib/review-findings";
+import { diffLineAnchorId, findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, parseDiffLineAnchor, sortFindings } from "@/lib/review-findings";
 import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
 import {
   clearInProgressReview,
@@ -106,6 +106,10 @@ function routeUrl(route: Route): string {
   if (route.repo && route.pull && route.step) params.set("step", String(route.step));
   const query = params.toString();
   return query ? `${window.location.pathname}?${query}` : window.location.pathname;
+}
+
+function clearLineHash(): void {
+  if (parseDiffLineAnchor(window.location.hash)) window.history.replaceState(null, "", window.location.pathname + window.location.search);
 }
 
 function timeAgo(value: string): string {
@@ -421,8 +425,6 @@ function ReplayFileView({
   file,
   step,
   currentRanges,
-  replayChunks,
-  changeSteps,
   showFullDiff,
   diffLayout,
   contentRepo,
@@ -433,7 +435,6 @@ function ReplayFileView({
   onAddFinding,
   onUpdate,
   onDelete,
-  onGoToStep,
   hidden = false,
   localContent,
   resolveComment,
@@ -444,8 +445,6 @@ function ReplayFileView({
   step: number;
   /** The current step's ranges, across every file; only this file's apply here. */
   currentRanges: readonly ReplayRange[];
-  replayChunks: ReplayChunk[];
-  changeSteps: ReadonlyMap<number, number>;
   showFullDiff: boolean;
   diffLayout: "unified" | "split";
   contentRepo: string;
@@ -456,7 +455,6 @@ function ReplayFileView({
   onAddFinding: (finding: ReviewFinding) => void;
   onUpdate: (id: string, body: string) => void;
   onDelete: (id: string) => void;
-  onGoToStep: (step: number, file: string) => void;
   /** Keeps the view mounted, with its composer and expanded context, while another file's tab is active. */
   hidden?: boolean;
   localContent?: string;
@@ -486,8 +484,7 @@ function ReplayFileView({
       ...hunk,
       originalIndex,
       sourceLines: hunk.lines,
-      // Keep every row in the active hunk mounted so adjacent replay steps do
-      // not make the line-number geometry jump. Future code is masked below.
+      // Preserve original hunk indexes for syntax highlighting and comment anchors.
       lines: hunk.lines,
     }))
     .filter((hunk) => showFullDiff || hunk.sourceLines.some((line) => inRanges(fileRanges, line.changedIndex)));
@@ -633,18 +630,9 @@ function ReplayFileView({
           const nextFirst = hunk.originalIndex < file.hunks.length - 1 ? hunkBoundsAt(hunk.originalIndex + 1).first : (contentLines?.length ?? Infinity) + 1;
           const canExpandBefore = expansion.before + (expanded[hunk.originalIndex - 1]?.after ?? 0) < hunkBounds.first - previousLast - 1;
           const canExpandAfter = expansion.after + (expanded[hunk.originalIndex + 1]?.before ?? 0) < nextFirst - hunkBounds.last - 1;
-          const renderLine = (lineIndex: number, side?: "LEFT" | "RIGHT", previousIndex: number | null = lineIndex - 1) => {
+          const renderLine = (lineIndex: number, side?: "LEFT" | "RIGHT") => {
             const line = hunk.lines[lineIndex];
             const current = inRanges(fileRanges, line.changedIndex);
-            const lineStep = line.changedIndex === null ? undefined : changeSteps.get(line.changedIndex);
-            const past = !showFullDiff && lineStep !== undefined && lineStep < step;
-            const future = !showFullDiff && lineStep !== undefined && lineStep > step;
-            const previousLine = previousIndex === null ? undefined : hunk.lines[previousIndex];
-            const previousLineStep = previousLine?.changedIndex === null || previousLine?.changedIndex === undefined
-              ? undefined
-              : changeSteps.get(previousLine.changedIndex);
-            const startsFutureGroup = future && previousLineStep !== lineStep;
-            const futureChunk = lineStep === undefined ? undefined : replayChunks[lineStep];
             const anchor = commentTarget(line, side);
             const anchors = !side && line.type === "context" ? [anchor, commentTarget(line, "LEFT")] : [anchor];
             const anchored = comments.filter((comment) => anchors.some((candidate) => !candidate.historical && comment.path === candidate.path && comment.line === candidate.line && comment.side === candidate.side));
@@ -652,27 +640,15 @@ function ReplayFileView({
             const composing = anchors.some((candidate) => target?.line === candidate.line && target.side === candidate.side && target.historical === candidate.historical);
             return (
               <Fragment key={`${hunk.originalIndex}-${lineIndex}`}>
-                <div className={`diff-row ${line.type} ${current ? "current" : ""} ${past ? "past-change" : ""} ${future ? "future-change" : ""}`}>
-                  {future
-                    ? <span className="future-change-gutter" />
-                    : <button className="add-comment" disabled={commentingDisabled} title={anchor.historical ? "This line changes before the final PR; a note will go into the review summary" : `Comment on PR line ${anchor.line}`} onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`${anchor.historical ? "Note on historical" : "Comment on"} ${side === "LEFT" ? "old " : side === "RIGHT" ? "new " : ""}line ${anchor.line}`}><span>+</span></button>}
+                <div id={side !== "LEFT" && line.newLine !== null ? diffLineAnchorId(file.path, line.newLine) : undefined} tabIndex={side !== "LEFT" && line.newLine !== null ? -1 : undefined} className={`diff-row ${line.type} ${current ? "current" : ""}`}>
+                  <button className="add-comment" disabled={commentingDisabled} title={anchor.historical ? "This line changes before the final PR; a note will go into the review summary" : `Comment on PR line ${anchor.line}`} onClick={() => anchor.line && setTarget({ ...anchor, line: anchor.line })} aria-label={`${anchor.historical ? "Note on historical" : "Comment on"} ${side === "LEFT" ? "old " : side === "RIGHT" ? "new " : ""}line ${anchor.line}`}><span>+</span></button>
                   {side ? <span className="line-number">{(side === "LEFT" ? line.oldLine : line.newLine) ?? ""}</span> : <>
                     <span className="line-number">{line.oldLine ?? ""}</span>
                     <span className="line-number">{line.newLine ?? ""}</span>
                   </>}
-                  {future ? (
-                    <code className="future-change-note">
-                      {startsFutureGroup && futureChunk ? (
-                        <button onClick={() => onGoToStep(lineStep, file.path)} title={`Go to Step ${lineStep + 1}: ${futureChunk.title}`}>
-                          <ArrowRight size={11} /> Later in Step {lineStep + 1} <span>· {futureChunk.title}</span>
-                        </button>
-                      ) : <span aria-hidden="true" />}
-                    </code>
-                  ) : (
-                    <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{renderCode(highlightedHunks[hunk.originalIndex]?.[lineIndex], line.text)}</code>
-                  )}
+                  <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{renderCode(highlightedHunks[hunk.originalIndex]?.[lineIndex], line.text)}</code>
                 </div>
-                {!future && anchoredFindings.map((finding, findingIndex) => {
+                {anchoredFindings.map((finding, findingIndex) => {
                   const staged = isFindingStaged(comments, finding, [file]);
                   return (
                     <div className="inline-finding" key={`${finding.title}-${findingIndex}`}>
@@ -690,7 +666,7 @@ function ReplayFileView({
                     </div>
                   );
                 })}
-                {!future && anchored.map((comment) => editingCommentId === comment.id ? (
+                {anchored.map((comment) => editingCommentId === comment.id ? (
                   <div className="inline-composer inline-comment-editor" key={comment.id}>
                     <textarea autoFocus value={editedBody} onChange={(event) => setEditedBody(event.target.value)} onKeyDown={(event) => {
                       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveEditedComment(); }
@@ -707,7 +683,7 @@ function ReplayFileView({
                     </div>
                   </div>
                 ))}
-                {!future && composing && (
+                {composing && (
                   <div className="inline-composer">
                     {target?.historical && <p className="historical-comment-hint"><TriangleAlert size={13} />This line changes before the final PR (or isn&apos;t in its diff), so GitHub can&apos;t place a comment on it. Your note will be added to the review summary with its file and step instead.</p>}
                     <textarea autoFocus value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitComment(); } }} placeholder={`Leave a comment on ${file.path}:${target?.line}`} />
@@ -717,7 +693,9 @@ function ReplayFileView({
               </Fragment>
             );
           };
-          const splitRows = diffLayout === "split" ? sideBySideRows(hunk.lines) : [];
+          const splitRows = diffLayout === "split"
+            ? showFullDiff ? sideBySideRows(hunk.lines) : sideBySideStepRows(hunk.lines, fileRanges)
+            : [];
           return (
           <Fragment key={`${file.path}-${hunk.originalIndex}`}>
             {canExpandBefore && <div className="context-expander above"><button onClick={() => void expandContext(hunk.originalIndex, "before")} disabled={expanding !== null} aria-label="Show 20 lines above" title="Show more lines above"><ChevronUp size={13} />Show 20 lines above</button></div>}
@@ -728,11 +706,11 @@ function ReplayFileView({
                 {(["left", "right"] as const).map((side) => {
                   const index = row[side];
                   return <div className={`split-cell ${index === null ? "split-empty" : ""}`} key={side}>
-                    {index !== null && renderLine(index, side === "left" ? "LEFT" : "RIGHT", splitRows[rowIndex - 1]?.[side] ?? null)}
+                    {index !== null && renderLine(index, side === "left" ? "LEFT" : "RIGHT")}
                   </div>;
                 })}
               </div>
-            )) : hunk.lines.map((_, index) => renderLine(index))}
+            )) : hunk.lines.map((line, index) => showFullDiff || stepLineVisible(line, fileRanges) ? renderLine(index) : null)}
             {contextRows(hunkBounds.last + 1, hunkBounds.last + expansion.after, afterOffset)}
             {canExpandAfter && <div className="context-expander below"><button onClick={() => void expandContext(hunk.originalIndex, "after")} disabled={expanding !== null} aria-label="Show 20 lines below" title="Show more lines below"><ChevronDown size={13} />Show 20 lines below</button></div>}
           </Fragment>
@@ -751,7 +729,6 @@ function RecordedReviewFile({ change, canonical, pull, step, hidden, contentCach
   onAdd: (comment: Omit<PendingComment, "id">) => void;
   onAddFinding: (finding: ReviewFinding) => void;
   onUpdate: (id: string, body: string) => void; onDelete: (id: string) => void;
-  onGoToStep: (step: number, file: string) => void;
   onHistoricalComment: (line: number, side: "LEFT" | "RIGHT", body: string) => void;
 }) {
   const file = useMemo(() => recordedChangeDiff(change), [change]);
@@ -783,7 +760,7 @@ function RecordedReviewFile({ change, canonical, pull, step, hidden, contentCach
   }, [canonical, change, contentCache, hidden, pull.baseRepo, pull.baseSha, pull.headRepo, pull.headSha]);
   return <div hidden={hidden}>
     {verificationError && <p className="recording-review-notice">PR line verification is unavailable for this file. Comments will be added to the review summary.</p>}
-    {!file.hunks.length ? <p className="recording-review-notice"><code>{change.path}</code>: {file.status}; no visible line changes (empty file or line-ending change).</p> : <ReplayFileView {...actions} file={file} step={step} currentRanges={[{ file: file.path, start: 1, end: file.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.changedIndex !== null).length }]} replayChunks={[]} changeSteps={new Map()} showFullDiff contentRepo="" contentRef="" localContent={change.after?.content ?? change.before?.content ?? ""} resolveComment={(line) => recordedLineAnchor(line, canonical, lineMaps ?? {})} commentingDisabled={lineMaps === null} />}
+    {!file.hunks.length ? <p className="recording-review-notice"><code>{change.path}</code>: {file.status}; no visible line changes (empty file or line-ending change).</p> : <ReplayFileView {...actions} file={file} step={step} currentRanges={[{ file: file.path, start: 1, end: file.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.changedIndex !== null).length }]} showFullDiff contentRepo="" contentRef="" localContent={change.after?.content ?? change.before?.content ?? ""} resolveComment={(line) => recordedLineAnchor(line, canonical, lineMaps ?? {})} commentingDisabled={lineMaps === null} />}
   </div>;
 }
 
@@ -935,7 +912,7 @@ function ReviewSidebar({
                 const staged = !!anchor && isFindingStaged(comments, finding, files);
                 return <article className="finding-card" key={`${finding.file}-${finding.line}-${index}`}>
                   <div className="finding-labels"><span className={`severity ${finding.severity}`}>{finding.severity}</span><span>{finding.category}</span></div>
-                  <button className="finding-jump" onClick={() => onGoToFinding(finding)}><strong>{finding.title}</strong><code>{finding.file}:{finding.line}</code></button>
+                  <button className="finding-jump" onClick={() => onGoToFinding(finding)} disabled={!anchor} aria-label={`Go to ${finding.file}, line ${finding.line}: ${finding.title}`} title={anchor ? `Go to ${finding.file}, line ${finding.line}` : "This line is not in the PR diff"}><strong>{finding.title}</strong><code>{finding.file}:{finding.line}</code></button>
                   <p>{finding.description}</p>
                   {finding.suggestion && <div className="finding-suggestion"><span>Suggestion</span><p>{finding.suggestion}</p></div>}
                   {staged ? <span className="finding-staged"><Check size={11} />Added to review</span> : anchor ? <button className="finding-add" onClick={() => onAddFinding(finding)}>+ Add to review</button> : <span className="finding-unanchored">Not on a diff line</span>}
@@ -1045,8 +1022,11 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const [diffLayout, setDiffLayout] = useState<"unified" | "split">("unified");
   // The file tab chosen for one step; any other step falls back to its first file.
   const [fileTab, setFileTab] = useState<{ step: number; file: string } | null>(null);
+  const [pendingLineAnchor, setPendingLineAnchor] = useState<{ path: string; line: number } | null>(null);
   const [stateReady, setStateReady] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const initialLineHashHandledRef = useRef(false);
+  const initialLineAnchorRef = useRef(typeof window === "undefined" ? null : parseDiffLineAnchor(window.location.hash));
   const timelineRef = useRef<HTMLOListElement>(null);
   const stateRevisionRef = useRef(0);
   const buildAbortRef = useRef<AbortController | null>(null);
@@ -1128,6 +1108,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   }, [repo, number, cacheKey, defaultScoutModel, defaultReviewerModel]);
 
   const selectRecording = (value: RecordingAttachment) => {
+    clearLineHash();
     if (replay && replay.source !== "recording") aiReplayRef.current = replay;
     setAttachment(value); setReplay(recordingReplay(value.recording, value.name));
     setStep(0); setFileTab(null); setPlaying(false); setShowFullDiff(false); setRecordingError(null);
@@ -1143,6 +1124,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     finally { setRecordingBusy(false); }
   };
   const selectAiSynopsis = () => {
+    clearLineHash();
     setReplay(aiReplayRef.current); setStep(0); setFileTab(null); setPlaying(false); setShowFullDiff(false);
   };
   useEffect(() => {
@@ -1260,14 +1242,16 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const activeFile = fileTab?.step === step && stepFiles.includes(fileTab.file) ? fileTab.file : stepFiles[0] ?? null;
   const changeSteps = useMemo(() => replayStepMap(replay?.chunks ?? []), [replay?.chunks]);
   const aiFindings = useMemo(() => sortFindings(aiReview?.findings ?? []), [aiReview]);
-  const go = (value: number, file?: string) => {
+  const go = useCallback((value: number, file?: string) => {
     if (!replay) return;
     const next = Math.max(0, Math.min(replay.chunks.length - 1, value));
+    clearLineHash();
     setPlaying(false); setStep(next);
     setFileTab(file ? { step: next, file } : null);
     scrollRef.current?.scrollTo({ top: 0 });
-  };
+  }, [replay]);
   const selectFileTab = (file: string) => {
+    clearLineHash();
     setFileTab({ step, file });
     scrollRef.current?.scrollTo({ top: 0 });
   };
@@ -1316,13 +1300,64 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
       : [...items, { id: crypto.randomUUID(), path: anchor.path, line: anchor.line, side: anchor.side, body, step: findingStep }]);
   };
   const addAllFindings = (findings: ReviewFinding[]) => findings.forEach(addFinding);
+  const jumpToLine = useCallback((anchor: NonNullable<ReturnType<typeof findingAnchor>>) => {
+    const owningStep = anchor.changedIndex === null ? undefined : changeSteps.get(anchor.changedIndex);
+    setPendingLineAnchor({ path: anchor.path, line: anchor.line });
+    setPlaying(false);
+    setShowFullDiff(isRecorded || recordingBusy || owningStep === undefined);
+    if (!isRecorded && owningStep !== undefined) go(owningStep, anchor.path);
+  }, [changeSteps, go, isRecorded, recordingBusy]);
   const goToFinding = (finding: ReviewFinding) => {
     const anchor = findingAnchor(files, finding);
-    if (!anchor) return;
-    if (isRecorded) { setShowFullDiff(true); return; }
-    setShowFullDiff(anchor.changedIndex === null);
-    if (anchor.changedIndex !== null) go(changeSteps.get(anchor.changedIndex) ?? step, anchor.path);
+    if (anchor) jumpToLine(anchor);
   };
+
+  // A finding link can be opened directly; restore its file, scope, and step
+  // before scrolling, even when the line is only context in the PR diff.
+  useEffect(() => {
+    if (!stateReady || !replay || recordingBusy || initialLineHashHandledRef.current) return;
+    const target = initialLineAnchorRef.current;
+    if (!target) { initialLineHashHandledRef.current = true; return; }
+    const anchor = findingAnchor(files, { file: target.path, line: target.line });
+    if (!anchor) { initialLineHashHandledRef.current = true; return; }
+    const frame = window.requestAnimationFrame(() => {
+      initialLineHashHandledRef.current = true;
+      jumpToLine(anchor);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [files, jumpToLine, recordingBusy, replay, stateReady]);
+
+  useEffect(() => {
+    const followLineHash = () => {
+      const target = parseDiffLineAnchor(window.location.hash);
+      if (!target) return;
+      const anchor = findingAnchor(files, { file: target.path, line: target.line });
+      if (anchor) jumpToLine(anchor);
+    };
+    window.addEventListener("hashchange", followLineHash);
+    return () => window.removeEventListener("hashchange", followLineHash);
+  }, [files, jumpToLine]);
+
+  useEffect(() => {
+    if (!pendingLineAnchor || recordingBusy) return;
+    const container = scrollRef.current;
+    const id = diffLineAnchorId(pendingLineAnchor.path, pendingLineAnchor.line);
+    const row = document.getElementById(id);
+    if (!container || !row || !container.contains(row) || row.closest("[hidden]")) return;
+    const offset = row.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    container.scrollTop += offset - Math.min(80, container.clientHeight / 4);
+    row.focus({ preventScroll: true });
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#${encodeURIComponent(id)}`);
+    setPendingLineAnchor(null);
+  }, [activeFile, diffLayout, isRecorded, pendingLineAnchor, recordingBusy, showFullDiff, step]);
+
+  useEffect(() => {
+    if (!initialLineHashHandledRef.current || pendingLineAnchor || recordingBusy) return;
+    const target = parseDiffLineAnchor(window.location.hash);
+    if (!target) return;
+    const row = document.getElementById(diffLineAnchorId(target.path, target.line));
+    if (!row || !scrollRef.current?.contains(row) || row.closest("[hidden]")) clearLineHash();
+  }, [activeFile, diffLayout, isRecorded, pendingLineAnchor, recordingBusy, showFullDiff, step]);
 
   useEffect(() => {
     if (!replay) return;
@@ -1472,9 +1507,9 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                   {(recordedEvent?.omitted ?? recording.session.omitted).length > 0 && <details className="recording-review-evidence"><summary>Omitted files at this checkpoint</summary><ul>{(recordedEvent?.omitted ?? recording.session.omitted).map((entry) => <li key={entry.path}><code>{entry.path}</code> — {entry.reason}</li>)}</ul></details>}
                   {recordedEvent?.command && <details className="recording-review-evidence" open><summary>Command result · {recordedEvent.command.exitCode === 0 ? "Passed" : "Failed"}{recordedEvent.command.signal ? ` (${recordedEvent.command.signal})` : ""}</summary><pre>{recordedEvent.command.argv.map((arg) => JSON.stringify(arg)).join(" ")}</pre><pre>{recordedEvent.command.output || "(no output)"}</pre>{recordedEvent.command.truncated && <p>Output truncated by the recorder.</p>}</details>}
                   {recordedEvent && !recordedEvent.changes.length && <p className="recording-review-notice">No file changes at this checkpoint. You can add a note in the review summary or review the full PR.</p>}
-                  {recordedEvent?.changes.map((change) => <RecordedReviewFile diffLayout={diffLayout} key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} contentCache={recordingContentCache} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
+                  {recordedEvent?.changes.map((change) => <RecordedReviewFile diffLayout={diffLayout} key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} contentCache={recordingContentCache} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
                 </>}
-              </> : files.map((file) => <ReplayFileView diffLayout={diffLayout} key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} replayChunks={replay.chunks} changeSteps={changeSteps} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onGoToStep={go} />)}
+              </> : files.map((file) => <ReplayFileView diffLayout={diffLayout} key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} />)}
             </div>
           </section>
           <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
@@ -1507,9 +1542,14 @@ export default function Home() {
   // Every in-app navigation writes history here and popstate only reads it
   // back, so the two directions cannot feed each other.
   const navigate = useCallback((next: Route, mode: "push" | "replace") => {
+    const previous = routeRef.current;
+    // A step sync during initial restore must retain a deep-linked line. A
+    // different step or PR drops the old line target.
+    const hash = mode === "replace" && next.repo === previous.repo && next.pull === previous.pull && next.step === previous.step
+      ? window.location.hash : "";
     routeRef.current = next;
     setRoute(next);
-    const url = routeUrl(next);
+    const url = routeUrl(next) + hash;
     if (mode === "push") window.history.pushState(null, "", url);
     else window.history.replaceState(null, "", url);
   }, []);
