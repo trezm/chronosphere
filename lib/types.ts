@@ -142,3 +142,23 @@ export interface PendingComment {
   body: string;
   step: number;
 }
+
+/** What a reviewer selected to ask the model about. Coordinates are in the shown file version. */
+export interface LineQuestionAnchor {
+  path: string;
+  line: number;
+  side: "LEFT" | "RIGHT";
+  lineText: string;
+  /** Distinguishes the final PR diff from a recorded checkpoint, whose line numbers differ. */
+  scope: string;
+  /** File text for recorded checkpoints, which are not on GitHub. */
+  fileContent?: string;
+  recordedStep?: string;
+}
+
+export interface LineQuestionThread extends LineQuestionAnchor {
+  id: string;
+  messages: Array<{ role: "user" | "assistant"; content: string; toolCalls?: Array<{ name: string; argument: string }> }>;
+  busy: boolean;
+  error: string | null;
+}

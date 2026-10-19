@@ -470,6 +470,34 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .diff-table-split > .hunk-row code { overflow-wrap: anywhere; }
 .add-comment:focus-visible { color: var(--surface); background: var(--accent); }
 
+/* Ask AI about a line: a pill that appears at the row's right edge on hover */
+.ask-line { position: absolute; top: 2px; right: 6px; z-index: 1; display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px; border: 1px solid var(--accent-border); border-radius: 999px; background: var(--surface); color: var(--accent); font: 600 10px var(--font-inter), Arial, sans-serif; cursor: pointer; opacity: 0; pointer-events: none; transition: opacity 0.1s; }
+.diff-row:hover .ask-line, .ask-line:focus-visible { opacity: 1; pointer-events: auto; }
+.ask-line:hover { background: var(--accent); color: var(--surface); }
+.ask-line:disabled { cursor: not-allowed; color: var(--faint); border-color: var(--border); background: var(--surface); }
+.line-thread { padding: 10px 12px 12px 118px; border-bottom: 1px solid var(--accent-border); background: var(--accent-soft); font-size: 12px; }
+.line-thread-header { display: flex; align-items: center; gap: 6px; color: var(--faint); font: 600 10px var(--font-mono), monospace; text-transform: uppercase; letter-spacing: 0.06em; }
+.line-thread-header > svg { color: var(--accent); flex: none; }
+.line-thread-header button { margin-left: auto; display: inline-flex; border: 0; background: transparent; color: var(--faint); cursor: pointer; padding: 2px; border-radius: var(--radius-sm); }
+.line-thread-header button:hover { color: var(--ink); background: var(--surface); }
+.line-thread-question { margin: 10px 0 0; color: var(--ink); font-weight: 600; white-space: pre-wrap; }
+.line-thread-answer { margin-top: 6px; padding-left: 10px; border-left: 2px solid var(--accent-border); }
+.line-thread-answer > p { margin: 0; color: var(--muted); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.line-thread-answer details { margin-bottom: 6px; color: var(--faint); font-size: 11px; }
+.line-thread-answer summary { cursor: pointer; }
+.line-thread-answer ul { margin: 4px 0 0; padding-left: 16px; }
+.line-thread-answer li code { color: var(--accent); }
+.line-thread-busy { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; color: var(--muted); }
+.line-thread .ai-review-error { margin-top: 8px; }
+.ask-composer { margin-top: 10px; }
+.ask-composer textarea { width: 100%; min-height: 44px; resize: vertical; border: 1px solid var(--accent-border); border-radius: var(--radius-sm); padding: 8px; font-size: 12px; background: var(--surface); color: var(--ink); }
+.ask-composer > div:last-child { margin-top: 8px; display: flex; justify-content: flex-end; gap: 8px; }
+.ask-composer .primary-button { display: inline-flex; align-items: center; gap: 5px; }
+.ask-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.ask-suggestions button { border: 1px solid var(--accent-border); border-radius: 999px; background: var(--surface); color: var(--accent); padding: 3px 10px; font-size: 11px; cursor: pointer; }
+.ask-suggestions button:hover { background: var(--accent); color: var(--surface); }
+.split-cell .line-thread { padding-left: 12px; overflow-wrap: anywhere; }
+
 /* Syntax highlighting */
 .shj-syn-cmnt { color: var(--syntax-comment); font-style: italic; }
 .shj-syn-deleted, .shj-syn-err, .shj-syn-kwd { color: var(--syntax-keyword); }
@@ -629,7 +657,7 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
   .timeline-panel { display: none; }
   .code-stage { height: 68vh; height: 68dvh; flex: none; }
   .review-sidebar { display: block; position: static; width: auto; max-height: none; flex: none; box-shadow: none; border-left: 0; border-top: 1px solid var(--border); }
-  .inline-composer, .inline-draft, .inline-finding { padding-left: 12px; }
+  .inline-composer, .inline-draft, .inline-finding, .line-thread { padding-left: 12px; }
 }
 
 /* Local recording viewer: preserve the review workspace palette and typography. */

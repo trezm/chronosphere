@@ -33,6 +33,7 @@ import {
   Trash2,
   TriangleAlert,
   UserRoundCheck,
+  X,
   XCircle,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -60,6 +61,8 @@ import type {
   DiffFile,
   DiffLine,
   AiReviewResult,
+  LineQuestionAnchor,
+  LineQuestionThread,
   PendingComment,
   PullRequestDetail,
   PullRequestSummary,
@@ -421,6 +424,59 @@ function stepFilesLabel(chunk: ReplayChunk): string {
   return paths.map((path) => path.slice(path.lastIndexOf("/") + 1)).join(", ");
 }
 
+const QUESTION_SUGGESTIONS = ["Is this necessary?", "Is this used anywhere else?", "What could break here?"];
+
+function AskComposer({ placeholder, suggestions, busy, onSubmit, onCancel }: {
+  placeholder: string;
+  suggestions?: readonly string[];
+  busy?: boolean;
+  onSubmit: (question: string) => void;
+  onCancel?: () => void;
+}) {
+  const [question, setQuestion] = useState("");
+  const submit = (value = question) => {
+    if (!value.trim() || busy) return;
+    onSubmit(value.trim());
+    setQuestion("");
+  };
+  return <div className="ask-composer">
+    {suggestions && <div className="ask-suggestions">{suggestions.map((suggestion) => <button key={suggestion} onClick={() => submit(suggestion)} disabled={busy}>{suggestion}</button>)}</div>}
+    <textarea autoFocus={!!onCancel} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => {
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); }
+      if (event.key === "Escape" && onCancel) { event.preventDefault(); onCancel(); }
+    }} placeholder={placeholder} aria-label={placeholder} />
+    <div>{onCancel && <button className="text-button" onClick={onCancel}>Cancel</button>}<button className="primary-button compact" onClick={() => submit()} disabled={!question.trim() || busy}><Sparkles size={12} />Ask</button></div>
+  </div>;
+}
+
+function LineThreadView({ thread, onAsk, onClose }: { thread: LineQuestionThread; onAsk: (question: string) => void; onClose: () => void }) {
+  return <div className="line-thread">
+    <div className="line-thread-header"><Sparkles size={13} /><span>Ask AI · {thread.path.slice(thread.path.lastIndexOf("/") + 1)}:{thread.line}</span><button onClick={onClose} aria-label="Close question thread" title="Close thread"><X size={12} /></button></div>
+    {thread.messages.map((message, index) => message.role === "user"
+      ? <p className="line-thread-question" key={index}>{message.content}</p>
+      : <div className="line-thread-answer" key={index}>
+        {message.toolCalls && message.toolCalls.length > 0 && <details><summary>Looked at {message.toolCalls.length} thing{message.toolCalls.length === 1 ? "" : "s"}</summary><ul>{message.toolCalls.map((call, callIndex) => <li key={callIndex}><code>{call.name}</code> {call.argument}</li>)}</ul></details>}
+        <p>{message.content}</p>
+      </div>)}
+    {thread.busy && <p className="line-thread-busy"><span className="spinner" />Thinking…</p>}
+    {thread.error && <div className="ai-review-error"><XCircle size={13} />{thread.error}</div>}
+    {!thread.busy && <AskComposer placeholder="Ask a follow-up…" busy={thread.busy} onSubmit={onAsk} />}
+  </div>;
+}
+
+/** Everything a file view needs to ask the model about a line and show the answers inline. */
+type LineAsk = {
+  scope: string;
+  threads: LineQuestionThread[];
+  /** Why asking is unavailable, such as OpenRouter not being connected. */
+  unavailable: string | null;
+  /** Recorded checkpoint content, which GitHub does not have. */
+  recorded?: { before?: string; after?: string; step: string };
+  onAsk: (anchor: LineQuestionAnchor, question: string) => void;
+  onFollowUp: (id: string, question: string) => void;
+  onClose: (id: string) => void;
+};
+
 function ReplayFileView({
   file,
   step,
@@ -440,6 +496,7 @@ function ReplayFileView({
   resolveComment,
   onHistoricalComment,
   commentingDisabled = false,
+  ask,
 }: {
   file: DiffFile;
   step: number;
@@ -461,7 +518,9 @@ function ReplayFileView({
   resolveComment?: (line: DiffLine) => ReviewAnchor | null;
   onHistoricalComment?: (line: number, side: "LEFT" | "RIGHT", body: string) => void;
   commentingDisabled?: boolean;
+  ask?: LineAsk;
 }) {
+  const [askTarget, setAskTarget] = useState<LineQuestionAnchor | null>(null);
   const [target, setTarget] = useState<{ path: string; line: number; side: "LEFT" | "RIGHT"; index: number | null; historical: boolean } | null>(null);
   const [body, setBody] = useState("");
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
@@ -612,6 +671,20 @@ function ReplayFileView({
     onUpdate(editingCommentId, editedBody.trim());
     cancelEditing();
   };
+  // Questions use the shown file's own coordinates, not the PR comment anchor,
+  // so they also work on recorded lines that never reach the final PR.
+  const askAnchor = (line: DiffLine, side?: "LEFT" | "RIGHT"): LineQuestionAnchor | null => {
+    if (!ask) return null;
+    const resolvedSide = side ?? (line.type === "delete" ? "LEFT" : "RIGHT");
+    const number = resolvedSide === "LEFT" ? line.oldLine : line.newLine;
+    if (number === null) return null;
+    const content = ask.recorded ? (resolvedSide === "LEFT" ? ask.recorded.before : ask.recorded.after) : undefined;
+    return {
+      path: file.path, line: number, side: resolvedSide, lineText: line.text, scope: ask.scope,
+      ...(ask.recorded ? { fileContent: content ?? "", recordedStep: ask.recorded.step } : {}),
+    };
+  };
+  const sameLine = (a: LineQuestionAnchor, b: LineQuestionAnchor) => a.path === b.path && a.line === b.line && a.side === b.side && a.scope === b.scope;
   return (
     <article className="diff-file" hidden={hidden}>
       <header><span className="file-dot" /> <code>{file.oldPath && file.oldPath !== file.path ? `${file.oldPath} → ` : ""}{file.path}</code><span>{fileComments.length ? `${fileComments.length} pending` : file.status}</span></header>
@@ -638,6 +711,9 @@ function ReplayFileView({
             const anchored = comments.filter((comment) => anchors.some((candidate) => !candidate.historical && comment.path === candidate.path && comment.line === candidate.line && comment.side === candidate.side));
             const anchoredFindings = anchor.historical ? [] : findingsAtNewLine(findings, anchor.path, anchor.side === "RIGHT" ? anchor.line : null);
             const composing = anchors.some((candidate) => target?.line === candidate.line && target.side === candidate.side && target.historical === candidate.historical);
+            const question = askAnchor(line, side);
+            const lineThreads = question ? ask!.threads.filter((thread) => sameLine(thread, question)) : [];
+            const askingHere = !!question && !!askTarget && sameLine(askTarget, question);
             return (
               <Fragment key={`${hunk.originalIndex}-${lineIndex}`}>
                 <div id={side !== "LEFT" && line.newLine !== null ? diffLineAnchorId(file.path, line.newLine) : undefined} tabIndex={side !== "LEFT" && line.newLine !== null ? -1 : undefined} className={`diff-row ${line.type} ${current ? "current" : ""}`}>
@@ -647,6 +723,7 @@ function ReplayFileView({
                     <span className="line-number">{line.newLine ?? ""}</span>
                   </>}
                   <code><i>{line.type === "add" ? "+" : line.type === "delete" ? "−" : " "}</i>{renderCode(highlightedHunks[hunk.originalIndex]?.[lineIndex], line.text)}</code>
+                  {question && <button className="ask-line" disabled={!!ask!.unavailable} title={ask!.unavailable ?? `Ask AI about line ${question.line}`} aria-label={`Ask AI about ${side === "LEFT" ? "old " : side === "RIGHT" ? "new " : ""}line ${question.line}`} onClick={() => setAskTarget(question)}><Sparkles size={11} />Ask</button>}
                 </div>
                 {anchoredFindings.map((finding, findingIndex) => {
                   const staged = isFindingStaged(comments, finding, [file]);
@@ -683,6 +760,13 @@ function ReplayFileView({
                     </div>
                   </div>
                 ))}
+                {lineThreads.map((thread) => <LineThreadView key={thread.id} thread={thread} onAsk={(text) => ask!.onFollowUp(thread.id, text)} onClose={() => ask!.onClose(thread.id)} />)}
+                {askingHere && (
+                  <div className="line-thread">
+                    <div className="line-thread-header"><Sparkles size={13} /><span>Ask AI about line {question.line}</span></div>
+                    <AskComposer placeholder={`Ask about ${file.path}:${question.line}`} suggestions={QUESTION_SUGGESTIONS} onSubmit={(text) => { ask!.onAsk(question, text); setAskTarget(null); }} onCancel={() => setAskTarget(null)} />
+                  </div>
+                )}
                 {composing && (
                   <div className="inline-composer">
                     {target?.historical && <p className="historical-comment-hint"><TriangleAlert size={13} />This line changes before the final PR (or isn&apos;t in its diff), so GitHub can&apos;t place a comment on it. Your note will be added to the review summary with its file and step instead.</p>}
@@ -730,6 +814,7 @@ function RecordedReviewFile({ change, canonical, pull, step, hidden, contentCach
   onAddFinding: (finding: ReviewFinding) => void;
   onUpdate: (id: string, body: string) => void; onDelete: (id: string) => void;
   onHistoricalComment: (line: number, side: "LEFT" | "RIGHT", body: string) => void;
+  ask: LineAsk;
 }) {
   const file = useMemo(() => recordedChangeDiff(change), [change]);
   const [lineMaps, setLineMaps] = useState<FinalLineMaps | null>(null);
@@ -760,7 +845,7 @@ function RecordedReviewFile({ change, canonical, pull, step, hidden, contentCach
   }, [canonical, change, contentCache, hidden, pull.baseRepo, pull.baseSha, pull.headRepo, pull.headSha]);
   return <div hidden={hidden}>
     {verificationError && <p className="recording-review-notice">PR line verification is unavailable for this file. Comments will be added to the review summary.</p>}
-    {!file.hunks.length ? <p className="recording-review-notice"><code>{change.path}</code>: {file.status}; no visible line changes (empty file or line-ending change).</p> : <ReplayFileView {...actions} file={file} step={step} currentRanges={[{ file: file.path, start: 1, end: file.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.changedIndex !== null).length }]} showFullDiff contentRepo="" contentRef="" localContent={change.after?.content ?? change.before?.content ?? ""} resolveComment={(line) => recordedLineAnchor(line, canonical, lineMaps ?? {})} commentingDisabled={lineMaps === null} />}
+    {!file.hunks.length ? <p className="recording-review-notice"><code>{change.path}</code>: {file.status}; no visible line changes (empty file or line-ending change).</p> : <ReplayFileView {...actions} file={file} step={step} currentRanges={[{ file: file.path, start: 1, end: file.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.changedIndex !== null).length }]} showFullDiff contentRepo="" contentRef="" localContent={change.after?.content ?? change.before?.content ?? ""} resolveComment={(line) => recordedLineAnchor(line, canonical, lineMaps ?? {})} commentingDisabled={lineMaps === null} ask={{ ...actions.ask, scope: `recorded-${step}`, recorded: { before: change.before?.content, after: change.after?.content, step: `step ${step + 1}` } }} />}
   </div>;
 }
 
@@ -1018,6 +1103,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const [aiReview, setAiReview] = useState<AiReviewResult | null>(null);
   const [aiReviewBusy, setAiReviewBusy] = useState(false);
   const [aiReviewError, setAiReviewError] = useState<string | null>(null);
+  const [lineThreads, setLineThreads] = useState<LineQuestionThread[]>([]);
   const [showFullDiff, setShowFullDiff] = useState(false);
   const [diffLayout, setDiffLayout] = useState<"unified" | "split">("unified");
   // The file tab chosen for one step; any other step falls back to its first file.
@@ -1290,6 +1376,49 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
       setAiReviewBusy(false);
     }
   };
+  const sendLineQuestion = async (thread: LineQuestionThread) => {
+    if (!pull) return;
+    try {
+      const result = await api<{ answer: string; toolCalls: Array<{ name: string; argument: string }> }>("/api/ai-ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repo, number: pull.number, headSha: pull.headSha, model: reviewerModel,
+          path: thread.path, line: thread.line, side: thread.side, lineText: thread.lineText,
+          fileContent: thread.fileContent, recordedStep: thread.recordedStep,
+          messages: thread.messages.map(({ role, content }) => ({ role, content })),
+        }),
+      });
+      setLineThreads((items) => items.map((item) => item.id === thread.id
+        ? { ...item, busy: false, messages: [...item.messages, { role: "assistant", content: result.answer, toolCalls: result.toolCalls }] }
+        : item));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not answer the question.";
+      setLineThreads((items) => items.map((item) => item.id === thread.id ? { ...item, busy: false, error: message } : item));
+    }
+  };
+  const askAboutLine = (anchor: LineQuestionAnchor, question: string) => {
+    const thread: LineQuestionThread = { ...anchor, id: crypto.randomUUID(), messages: [{ role: "user", content: question }], busy: true, error: null };
+    setLineThreads((items) => [...items, thread]);
+    void sendLineQuestion(thread);
+  };
+  const askFollowUp = (id: string, question: string) => {
+    const current = lineThreads.find((item) => item.id === id);
+    if (!current || current.busy) return;
+    // A failed question is replaced by the retry rather than left unanswered in the history.
+    const messages = current.error && current.messages.at(-1)?.role === "user" ? current.messages.slice(0, -1) : current.messages;
+    const thread: LineQuestionThread = { ...current, busy: true, error: null, messages: [...messages, { role: "user", content: question }] };
+    setLineThreads((items) => items.map((item) => item.id === id ? thread : item));
+    void sendLineQuestion(thread);
+  };
+  const lineAsk: LineAsk = {
+    scope: "pr",
+    threads: lineThreads,
+    unavailable: aiAvailable ? null : "Connect OpenRouter to ask AI about code",
+    onAsk: askAboutLine,
+    onFollowUp: askFollowUp,
+    onClose: (id) => setLineThreads((items) => items.filter((item) => item.id !== id)),
+  };
   const addFinding = (finding: ReviewFinding) => {
     const anchor = findingAnchor(files, finding);
     if (!anchor) return;
@@ -1507,9 +1636,9 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                   {(recordedEvent?.omitted ?? recording.session.omitted).length > 0 && <details className="recording-review-evidence"><summary>Omitted files at this checkpoint</summary><ul>{(recordedEvent?.omitted ?? recording.session.omitted).map((entry) => <li key={entry.path}><code>{entry.path}</code> — {entry.reason}</li>)}</ul></details>}
                   {recordedEvent?.command && <details className="recording-review-evidence" open><summary>Command result · {recordedEvent.command.exitCode === 0 ? "Passed" : "Failed"}{recordedEvent.command.signal ? ` (${recordedEvent.command.signal})` : ""}</summary><pre>{recordedEvent.command.argv.map((arg) => JSON.stringify(arg)).join(" ")}</pre><pre>{recordedEvent.command.output || "(no output)"}</pre>{recordedEvent.command.truncated && <p>Output truncated by the recorder.</p>}</details>}
                   {recordedEvent && !recordedEvent.changes.length && <p className="recording-review-notice">No file changes at this checkpoint. You can add a note in the review summary or review the full PR.</p>}
-                  {recordedEvent?.changes.map((change) => <RecordedReviewFile diffLayout={diffLayout} key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} contentCache={recordingContentCache} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
+                  {recordedEvent?.changes.map((change) => <RecordedReviewFile diffLayout={diffLayout} key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} contentCache={recordingContentCache} ask={lineAsk} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
                 </>}
-              </> : files.map((file) => <ReplayFileView diffLayout={diffLayout} key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} />)}
+              </> : files.map((file) => <ReplayFileView diffLayout={diffLayout} key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} ask={lineAsk} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} />)}
             </div>
           </section>
           <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
