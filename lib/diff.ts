@@ -140,6 +140,9 @@ export interface RawReplayChunk {
   title?: unknown;
   description?: unknown;
   impactful?: unknown;
+  /** Tree replays: the model's name for this node and for the node that relies on it. */
+  id?: unknown;
+  parent?: unknown;
 }
 
 function candidateRanges(candidate: RawReplayChunk, total: number): Array<{ start: number; end: number }> {
@@ -162,10 +165,22 @@ export function normalizeReplayChunks(
   raw: RawReplayChunk[],
   files: DiffFile[]
 ): ReplayChunk[] {
+  return normalizeReplayChunksWithSources(raw, files).chunks;
+}
+
+/**
+ * Like normalizeReplayChunks, and also reports which model candidate each step
+ * came from: an index into `raw`, or null for the "Remaining changes" steps.
+ */
+export function normalizeReplayChunksWithSources(
+  raw: RawReplayChunk[],
+  files: DiffFile[]
+): { chunks: ReplayChunk[]; sources: Array<number | null> } {
   const changed = changedLines(files);
-  if (changed.length === 0) return [];
+  if (changed.length === 0) return { chunks: [], sources: [] };
   const claimed = new Set<number>();
   const chunks: ReplayChunk[] = [];
+  const sources: Array<number | null> = [];
 
   /**
    * Claims every still-unclaimed line in [start, end], split into contiguous
@@ -198,17 +213,18 @@ export function normalizeReplayChunks(
     return ranges;
   };
 
-  for (const candidate of raw ?? []) {
-    if (!candidate || typeof candidate !== "object") continue;
+  (raw ?? []).forEach((candidate, source) => {
+    if (!candidate || typeof candidate !== "object") return;
     const ranges = candidateRanges(candidate, changed.length).flatMap((range) => claimRange(range.start, range.end));
-    if (!ranges.length) continue;
+    if (!ranges.length) return;
+    sources.push(source);
     chunks.push({
       ranges,
       title: String(candidate.title ?? "").trim() || "Implementation step",
       description: String(candidate.description ?? "").trim(),
       impactful: candidate.impactful === true,
     });
-  }
+  });
 
   for (let index = 1; index <= changed.length; index++) {
     if (claimed.has(index)) continue;
@@ -221,6 +237,7 @@ export function normalizeReplayChunks(
     ) {
       end++;
     }
+    sources.push(null);
     chunks.push({
       ranges: claimRange(index, end),
       title: "Remaining changes",
@@ -230,7 +247,7 @@ export function normalizeReplayChunks(
     index = end;
   }
 
-  return chunks;
+  return { chunks, sources };
 }
 
 /** The distinct files a step touches, in the order its ranges visit them. */

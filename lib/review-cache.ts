@@ -1,3 +1,4 @@
+import { hasValidTreeParents } from "./replay-tree.ts";
 import type { AiReviewResult, PendingComment, ReplayChunk, ReplayRange, ReplayResult } from "./types";
 
 export type ReviewEvent = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
@@ -54,7 +55,8 @@ function isReplayChunk(value: unknown, recorded = false): value is ReplayChunk |
     && (chunk.files === undefined || (Array.isArray(chunk.files) && chunk.files.every((file) => typeof file === "string")))
     && typeof chunk.title === "string"
     && typeof chunk.description === "string"
-    && (chunk.impactful === undefined || typeof chunk.impactful === "boolean");
+    && (chunk.impactful === undefined || typeof chunk.impactful === "boolean")
+    && (chunk.parent === undefined || chunk.parent === null || Number.isInteger(chunk.parent));
 }
 
 /** Accepts replays stored in either the current or the legacy single-range step shape. */
@@ -66,7 +68,8 @@ export function isReplay(value: unknown): value is ReplayResult {
     && typeof replay.truncated === "boolean"
     && Array.isArray(replay.chunks)
     && replay.chunks.length > 0
-    && replay.chunks.every((chunk) => isReplayChunk(chunk, replay.source === "recording"));
+    && replay.chunks.every((chunk) => isReplayChunk(chunk, replay.source === "recording"))
+    && (replay.layout === undefined || (replay.layout === "tree" && replay.source === undefined && hasValidTreeParents(replay.chunks)));
 }
 
 /** Rewrites legacy single-range steps into the current multi-range shape. */

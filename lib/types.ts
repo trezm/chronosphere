@@ -88,12 +88,22 @@ export interface ReplayChunk {
   title: string;
   description: string;
   impactful?: boolean;
+  /**
+   * Tree replays only: the index of the step that relies on this one, or null
+   * for a root. Always greater than this step's own index.
+   */
+  parent?: number | null;
 }
 
 export interface ReplayResult {
   source?: "recording";
   recordingId?: string;
   recordingName?: string;
+  /**
+   * "tree" replays arrange steps as a dependency tree: chunks are stored
+   * children first, so their order is still a valid build order.
+   */
+  layout?: "tree";
   model: string;
   chunks: ReplayChunk[];
   truncated: boolean;
