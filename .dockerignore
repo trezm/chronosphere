@@ -1,0 +1,12 @@
+node_modules
+dist
+.next
+.wrangler
+.data
+.env
+.env.*
+!.env.example
+.git
+.claude
+.chronosphere
+deploy

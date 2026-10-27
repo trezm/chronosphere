@@ -1,0 +1,128 @@
+# Chronosphere on the microk8s cluster.
+#
+# Not in this file (created out of band):
+#   secret/chronosphere-env  APP_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
+#                            SESSION_SECRET, OPENROUTER_MODEL
+#   secret/ghcr-pull         registry credentials, copied from another namespace
+#
+# Public traffic reaches the shared ingress through a proxied Cloudflare record
+# for getchronosphere.com, and Cloudflare terminates TLS for visitors. Add a
+# cert-manager TLS block once the cluster's letsencrypt issuer can reach
+# Cloudflare again.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chronosphere
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chronosphere-data
+  namespace: chronosphere
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chronosphere
+  namespace: chronosphere
+spec:
+  # SQLite on a ReadWriteOnce volume: exactly one writer, never two at once.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: chronosphere
+  template:
+    metadata:
+      labels:
+        app: chronosphere
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        # The image runs as the `node` user (uid 1000); let it write the volume.
+        fsGroup: 1000
+      containers:
+        - name: chronosphere
+          image: ghcr.io/trezm/chronosphere:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: chronosphere-env
+          env:
+            - name: SQLITE_PATH
+              value: /data/chronosphere.sqlite
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /api/auth/session
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/auth/session
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: chronosphere-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chronosphere
+  namespace: chronosphere
+spec:
+  selector:
+    app: chronosphere
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chronosphere
+  namespace: chronosphere
+  annotations:
+    # Saved review state carries the whole replay; the default 1m cap is too small.
+    nginx.ingress.kubernetes.io/proxy-body-size: 25m
+    # Replay builds stream for up to two minutes (app/api/replay maxDuration).
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  ingressClassName: public
+  rules:
+    - host: getchronosphere.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: chronosphere
+                port:
+                  name: http
