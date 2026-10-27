@@ -401,6 +401,81 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .diff-view-controls { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* ============================================================================
+   Replay: dependency tree
+   ========================================================================== */
+
+/* Build screen: choose a linear replay or a dependency tree. */
+.build-layout { width: min(420px, 100%); display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 24px; }
+.build-layout button { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--muted); text-align: left; cursor: pointer; }
+.build-layout button:hover:not(:disabled) { border-color: var(--accent-border); }
+.build-layout button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.build-layout button:disabled { opacity: 0.6; cursor: default; }
+.build-layout strong { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--ink); font-size: 13px; font-weight: 620; }
+.build-layout strong em { font: 600 9px var(--font-mono), monospace; font-style: normal; text-transform: uppercase; letter-spacing: 0.06em; border: 1px solid var(--amber-border); background: var(--amber-soft); color: var(--amber); border-radius: var(--radius-full); padding: 1px 6px; }
+.build-layout span { color: var(--muted); font-size: 11px; line-height: 1.45; }
+
+/* Outline rail: indentation stands in for the tree's edges. */
+.tree-outline li::after { display: none; }
+.tree-outline li button { padding-left: calc(16px + var(--depth, 0) * 14px); }
+
+.tree-stage { position: relative; }
+.tree-bar { gap: 10px; color: var(--muted); }
+.tree-bar > strong { color: var(--ink); }
+.tree-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--faint); }
+.tree-bar .rebuild-button { margin-left: auto; }
+
+/* The tree, root at the top. Each item draws the half-edges above itself, so
+   siblings join into one bar and a lone child hangs straight down. */
+.tree-canvas { flex: 1; min-height: 0; overflow: auto; padding: 28px 24px 40px; }
+.dep-tree, .dep-tree ul { display: flex; justify-content: center; margin: 0; padding: 0; list-style: none; }
+.dep-tree { width: max-content; min-width: 100%; gap: 32px; }
+.dep-tree ul { position: relative; padding-top: 20px; }
+.dep-tree li { position: relative; display: flex; flex-direction: column; align-items: center; padding: 20px 6px 0; }
+.dep-tree > li { padding-top: 0; }
+.dep-tree li::before, .dep-tree li::after { content: ""; position: absolute; top: 0; right: 50%; width: 50%; height: 20px; border-top: 1px solid var(--border-strong); }
+.dep-tree li::after { right: auto; left: 50%; border-left: 1px solid var(--border-strong); }
+.dep-tree > li::before, .dep-tree > li::after, .dep-tree li:only-child::before, .dep-tree li:only-child::after { display: none; }
+.dep-tree li:only-child { padding-top: 0; }
+.dep-tree li:first-child::before, .dep-tree li:last-child::after { border: 0; }
+.dep-tree li:last-child::before { border-right: 1px solid var(--border-strong); border-top-right-radius: 6px; }
+.dep-tree li:first-child::after { border-top-left-radius: 6px; }
+.dep-tree ul::before { content: ""; position: absolute; top: 0; left: 50%; height: 20px; border-left: 1px solid var(--border-strong); }
+
+.tree-node { width: 196px; display: flex; flex-direction: column; gap: 5px; padding: 10px 12px 11px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-sm); text-align: left; cursor: pointer; }
+.tree-node:hover { border-color: var(--accent-border); box-shadow: var(--shadow-md); }
+.tree-node.leaf { background: var(--surface-2); border-style: dashed; }
+.tree-node.impactful { border-color: var(--amber-border); }
+.tree-node.active { border: 1px solid var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.tree-node-top { display: flex; align-items: center; gap: 8px; }
+.tree-node-top .step-marker { width: 22px; height: 22px; }
+.tree-node.active .step-marker { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.tree-node-kind { font: 600 9px var(--font-mono), monospace; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); }
+.tree-node.leaf .tree-node-kind { color: var(--lime-dark); }
+.tree-node .tab-pending { margin-left: auto; display: inline-flex; align-items: center; gap: 3px; border-radius: var(--radius-full); padding: 1px 6px; background: var(--accent-soft); color: var(--accent); font: 600 10px var(--font-mono), monospace; }
+.tree-node strong { font-size: 12.5px; line-height: 1.35; font-weight: 600; color: var(--ink); }
+.tree-node code { font-size: 10px; color: var(--faint); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tree-node em { font: 500 10px var(--font-mono), monospace; font-style: normal; color: var(--muted); }
+
+/* A node's diff slides over the tree; a sliver of tree stays visible behind it. */
+.tree-backdrop { position: absolute; inset: 0; z-index: 19; border: 0; padding: 0; background: color-mix(in srgb, var(--ink) 14%, transparent); cursor: pointer; }
+.tree-overlay { position: absolute; inset: 0 0 0 36px; z-index: 20; display: flex; flex-direction: column; min-width: 0; background: var(--bg); border-left: 1px solid var(--border-strong); box-shadow: var(--shadow-lg); animation: tree-overlay-in 0.16s ease-out; }
+@keyframes tree-overlay-in { from { transform: translateX(24px); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .tree-overlay { animation: none; } }
+.overlay-bar { gap: 6px; }
+.tree-breadcrumb { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; overflow: hidden; color: var(--faint); }
+.tree-breadcrumb button { flex: none; border: 0; background: transparent; border-radius: var(--radius-sm); padding: 4px 6px; color: var(--muted); font: 600 11px var(--font-mono), monospace; cursor: pointer; }
+.tree-breadcrumb button:hover { background: var(--surface-3); color: var(--ink); }
+.tree-breadcrumb button.current { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font: 600 12px var(--font-inter), Arial, sans-serif; }
+.overlay-bar > strong { font: 600 12px var(--font-mono), monospace; white-space: nowrap; padding: 0 4px; }
+.overlay-bar > strong span { color: var(--faint); font-weight: 400; }
+
+.node-relations { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.node-relations > span { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.node-relations em { font: 600 10px var(--font-mono), monospace; font-style: normal; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); }
+.node-relations button { border: 1px solid var(--border); border-radius: var(--radius-full); background: var(--surface); padding: 2px 9px; color: var(--ink); font-size: 11.5px; cursor: pointer; }
+.node-relations button:hover { border-color: var(--accent-border); background: var(--accent-soft); color: var(--accent); }
+
+/* ============================================================================
    Replay: file tabs
    ========================================================================== */
 
@@ -656,6 +731,9 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
   .replay-grid { display: flex; flex-direction: column; overflow: auto; }
   .timeline-panel { display: none; }
   .code-stage { height: 68vh; height: 68dvh; flex: none; }
+  .tree-overlay { inset: 0; }
+  .tree-hint { display: none; }
+  .build-layout { grid-template-columns: 1fr; }
   .review-sidebar { display: block; position: static; width: auto; max-height: none; flex: none; box-shadow: none; border-left: 0; border-top: 1px solid var(--border); }
   .inline-composer, .inline-draft, .inline-finding, .line-thread { padding-left: 12px; }
 }

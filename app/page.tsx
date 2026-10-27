@@ -16,10 +16,12 @@ import {
   GitBranch,
   GitMerge,
   GitPullRequest,
+  ListOrdered,
   Lock,
   LogOut,
   MessageSquare,
   Moon,
+  Network,
   Pause,
   Pencil,
   Play,
@@ -46,6 +48,7 @@ import { api, authorizedFetch, onGithubSessionExpired } from "@/lib/api";
 import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap, sideBySideRows, sideBySideStepRows, stepLineVisible } from "@/lib/diff";
 import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
 import { readReplayEvents } from "@/lib/replay-stream";
+import { isTreeReplay, subtreeRanges, treeChildren, treeOutline, treePath, treeRoots } from "@/lib/replay-tree";
 import { diffLineAnchorId, findingAnchor, findingToCommentBody, findingsAtNewLine, isFindingStaged, parseDiffLineAnchor, sortFindings } from "@/lib/review-findings";
 import { highlightLines, languageForPath, type SyntaxToken } from "@/lib/syntax";
 import {
@@ -422,6 +425,46 @@ function stepFilesLabel(chunk: ReplayChunk): string {
   if (!paths.length) return "Checkpoint";
   if (paths.length === 1) return paths[0];
   return paths.map((path) => path.slice(path.lastIndexOf("/") + 1)).join(", ");
+}
+
+function rangeLines(ranges: readonly ReplayRange[]): number {
+  return ranges.reduce((sum, range) => sum + range.end - range.start + 1, 0);
+}
+
+/**
+ * The dependency tree drawn root-first: every card relies on the cards that
+ * hang beneath it, so reading bottom-up follows the build.
+ */
+function DependencyTree({ chunks, selected, comments, onOpen }: {
+  chunks: ReplayChunk[];
+  selected: number | null;
+  comments: PendingComment[];
+  onOpen: (step: number) => void;
+}) {
+  const children = useMemo(() => treeChildren(chunks), [chunks]);
+  const roots = useMemo(() => treeRoots(chunks), [chunks]);
+  const renderNode = (index: number) => {
+    const chunk = chunks[index];
+    const below = children[index];
+    const pending = comments.filter((comment) => comment.step === index).length;
+    const lines = rangeLines(chunk.ranges);
+    return (
+      <li key={index}>
+        <button className={`tree-node${index === selected ? " active" : ""}${chunk.impactful ? " impactful" : ""}${below.length ? "" : " leaf"}`} onClick={() => onOpen(index)} aria-label={`Open node ${index + 1}: ${chunk.title}`}>
+          <span className="tree-node-top">
+            <span className="step-marker">{index + 1}{chunk.impactful && <Star className="impact-star" size={10} fill="currentColor" aria-hidden="true" />}</span>
+            <span className="tree-node-kind">{below.length ? `Builds on ${below.length}` : "Leaf"}</span>
+            {pending > 0 && <span className="tab-pending"><MessageSquare size={10} />{pending}</span>}
+          </span>
+          <strong>{chunk.title}</strong>
+          <code>{stepFilesLabel(chunk)}</code>
+          <em>{lines} {lines === 1 ? "line" : "lines"}</em>
+        </button>
+        {below.length > 0 && <ul>{below.map(renderNode)}</ul>}
+      </li>
+    );
+  };
+  return <div className="tree-canvas"><ul className="dep-tree">{roots.map(renderNode)}</ul></div>;
 }
 
 const QUESTION_SUGGESTIONS = ["Is this necessary?", "Is this used anywhere else?", "What could break here?"];
@@ -1106,6 +1149,12 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const [lineThreads, setLineThreads] = useState<LineQuestionThread[]>([]);
   const [showFullDiff, setShowFullDiff] = useState(false);
   const [diffLayout, setDiffLayout] = useState<"unified" | "split">("unified");
+  // Tree replays: which shape the next build asks for, whether a node's diff
+  // is open over the tree (a deep-linked step opens straight into it), and
+  // whether that diff includes the node's prerequisites.
+  const [buildLayout, setBuildLayout] = useState<"steps" | "tree">("steps");
+  const [nodeOpen, setNodeOpen] = useState(initialStep !== null);
+  const [treeScope, setTreeScope] = useState<"node" | "subtree">("node");
   // The file tab chosen for one step; any other step falls back to its first file.
   const [fileTab, setFileTab] = useState<{ step: number; file: string } | null>(null);
   const [pendingLineAnchor, setPendingLineAnchor] = useState<{ path: string; line: number } | null>(null);
@@ -1152,6 +1201,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         if (cached) {
           setReplay(upgradeReplay(cached.replay));
           if (cached.replay.source !== "recording") aiReplayRef.current = upgradeReplay(cached.replay);
+          setBuildLayout(isTreeReplay(cached.replay) ? "tree" : "steps");
           const restored = bootStepRef.current === null ? cached.step : bootStepRef.current - 1;
           setStep(Math.max(0, Math.min(restored, cached.replay.chunks.length - 1)));
           setComments(cached.review?.comments ?? []);
@@ -1211,7 +1261,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   };
   const selectAiSynopsis = () => {
     clearLineHash();
-    setReplay(aiReplayRef.current); setStep(0); setFileTab(null); setPlaying(false); setShowFullDiff(false);
+    setReplay(aiReplayRef.current); setStep(0); setFileTab(null); setPlaying(false); setShowFullDiff(false); setNodeOpen(false);
   };
   useEffect(() => {
     // A rebuild briefly removes the replay from memory; retain the last complete
@@ -1264,7 +1314,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   }, [playing, step, replay]);
   useEffect(() => {
     if (!replay) return;
-    timelineRef.current?.children.item(step)?.scrollIntoView({ block: "nearest" });
+    timelineRef.current?.querySelector(`[data-step="${step}"]`)?.scrollIntoView({ block: "nearest" });
   }, [replay, step]);
   // Steps replace the current history entry, so Back leaves the replay instead
   // of walking every step of it. Waiting for the restore keeps a deep-linked
@@ -1292,7 +1342,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     try {
       const response = await authorizedFetch("/api/replay", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo, number, model }),
+        body: JSON.stringify({ repo, number, model, layout: buildLayout === "tree" ? "tree" : undefined }),
         signal: controller.signal,
       });
       if (!response.ok || !response.body) {
@@ -1307,7 +1357,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         else built = event.replay;
       }
       if (!built) throw new Error("The replay stream ended before it finished.");
-      aiReplayRef.current = built; setReplay(built); setStep(0);
+      aiReplayRef.current = built; setReplay(built); setStep(0); setNodeOpen(false); setTreeScope("node");
     } catch (error) {
       if (controller.signal.aborted) return;
       setError(error instanceof Error ? error.message : "Could not build replay.");
@@ -1324,7 +1374,15 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const recording = isRecorded && attachment && attachment.recording.session.id === replay?.recordingId && attachment.headSha === pull?.headSha ? attachment.recording : null;
   const recordedEvent = recording?.events[step - 1];
   const chunk = replay?.chunks[step] ?? null;
-  const stepFiles = useMemo(() => chunk ? chunk.files ?? chunkFiles(chunk) : [], [chunk]);
+  const treeLayout = !isRecorded && isTreeReplay(replay);
+  // In a tree, "With prerequisites" widens the step to everything beneath it.
+  const scopeRanges = useMemo(
+    () => !chunk ? [] : treeLayout && treeScope === "subtree" && replay ? subtreeRanges(replay.chunks, step) : chunk.ranges,
+    [chunk, replay, step, treeLayout, treeScope],
+  );
+  const stepFiles = useMemo(() => chunk ? chunk.files ?? chunkFiles({ ranges: scopeRanges }) : [], [chunk, scopeRanges]);
+  const nodeChildren = useMemo(() => treeLayout && replay ? treeChildren(replay.chunks) : [], [replay, treeLayout]);
+  const outline = useMemo(() => treeLayout && replay ? treeOutline(replay.chunks) : [], [replay, treeLayout]);
   const activeFile = fileTab?.step === step && stepFiles.includes(fileTab.file) ? fileTab.file : stepFiles[0] ?? null;
   const changeSteps = useMemo(() => replayStepMap(replay?.chunks ?? []), [replay?.chunks]);
   const aiFindings = useMemo(() => sortFindings(aiReview?.findings ?? []), [aiReview]);
@@ -1332,7 +1390,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     if (!replay) return;
     const next = Math.max(0, Math.min(replay.chunks.length - 1, value));
     clearLineHash();
-    setPlaying(false); setStep(next);
+    setPlaying(false); setStep(next); setNodeOpen(true);
     setFileTab(file ? { step: next, file } : null);
     scrollRef.current?.scrollTo({ top: 0 });
   }, [replay]);
@@ -1345,6 +1403,17 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     setComments([]);
     setReviewSummary("");
     setReviewEvent("COMMENT");
+  };
+  // In a tree, a comment belongs to the node that owns its line, even when it
+  // was left while a parent's prerequisites were in view.
+  const addComment = (comment: Omit<PendingComment, "id">) => {
+    let owner = comment.step;
+    if (treeLayout) {
+      const line = files.find((file) => file.path === comment.path)?.hunks.flatMap((hunk) => hunk.lines)
+        .find((candidate) => (comment.side === "LEFT" ? candidate.oldLine : candidate.newLine) === comment.line);
+      if (line?.changedIndex != null) owner = changeSteps.get(line.changedIndex) ?? owner;
+    }
+    setComments((items) => [...items, { ...comment, step: owner, id: crypto.randomUUID() }]);
   };
   const updateComment = (id: string, body: string) => {
     setComments((items) => items.map((item) => item.id === id ? { ...item, body } : item));
@@ -1432,7 +1501,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const jumpToLine = useCallback((anchor: NonNullable<ReturnType<typeof findingAnchor>>) => {
     const owningStep = anchor.changedIndex === null ? undefined : changeSteps.get(anchor.changedIndex);
     setPendingLineAnchor({ path: anchor.path, line: anchor.line });
-    setPlaying(false);
+    setPlaying(false); setNodeOpen(true);
     setShowFullDiff(isRecorded || recordingBusy || owningStep === undefined);
     if (!isRecorded && owningStep !== undefined) go(owningStep, anchor.path);
   }, [changeSteps, go, isRecorded, recordingBusy]);
@@ -1478,7 +1547,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     row.focus({ preventScroll: true });
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#${encodeURIComponent(id)}`);
     setPendingLineAnchor(null);
-  }, [activeFile, diffLayout, isRecorded, pendingLineAnchor, recordingBusy, showFullDiff, step]);
+  }, [activeFile, diffLayout, isRecorded, nodeOpen, pendingLineAnchor, recordingBusy, showFullDiff, step, treeScope]);
 
   useEffect(() => {
     if (!initialLineHashHandledRef.current || pendingLineAnchor || recordingBusy) return;
@@ -1486,7 +1555,20 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     if (!target) return;
     const row = document.getElementById(diffLineAnchorId(target.path, target.line));
     if (!row || !scrollRef.current?.contains(row) || row.closest("[hidden]")) clearLineHash();
-  }, [activeFile, diffLayout, isRecorded, pendingLineAnchor, recordingBusy, showFullDiff, step]);
+  }, [activeFile, diffLayout, isRecorded, nodeOpen, pendingLineAnchor, recordingBusy, showFullDiff, step, treeScope]);
+
+  useEffect(() => {
+    if (!treeLayout || !nodeOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (event.key !== "Escape" || (target instanceof HTMLElement && (target.isContentEditable || target.matches("input, textarea, select")))) return;
+      event.preventDefault();
+      clearLineHash();
+      setNodeOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [nodeOpen, treeLayout]);
 
   useEffect(() => {
     if (!replay) return;
@@ -1515,6 +1597,75 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   if (loading || !pull) {
     return <main className="loading-screen"><span className="spinner large" /><strong>Loading #{number}</strong><span>{repo}</span>{error && <div className="error-banner">{error}</div>}</main>;
   }
+
+  // The narration, file tabs and diff are shared by the linear player and the
+  // tree's node overlay, so both review the same way.
+  const reviewSidebar = <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />;
+  const stepNarration = chunk && (
+    <div className="step-narration">
+      <div className="step-narration-top">
+        <div className="step-meta">
+          <span>{treeLayout ? "Node" : "Step"} {step + 1}</span>
+          {chunk.impactful && <span className="impact-label"><Star size={10} fill="currentColor" aria-hidden="true" />High impact</span>}
+          <code>{stepFilesLabel(chunk)}</code>
+        </div>
+        <div className="diff-view-controls">
+          <div className="diff-scope-toggle" role="group" aria-label="Diff layout">
+            <button className={diffLayout === "unified" ? "active" : ""} onClick={() => setDiffLayout("unified")} aria-pressed={diffLayout === "unified"}>Unified</button>
+            <button className={diffLayout === "split" ? "active" : ""} onClick={() => setDiffLayout("split")} aria-pressed={diffLayout === "split"}>Side by side</button>
+          </div>
+          {treeLayout ? (
+            <div className="diff-scope-toggle" role="group" aria-label="Diff scope">
+              <button className={!showFullDiff && treeScope === "node" ? "active" : ""} onClick={() => { setShowFullDiff(false); setTreeScope("node"); }} aria-pressed={!showFullDiff && treeScope === "node"}>This node</button>
+              <button className={!showFullDiff && treeScope === "subtree" ? "active" : ""} onClick={() => { setShowFullDiff(false); setTreeScope("subtree"); }} aria-pressed={!showFullDiff && treeScope === "subtree"} disabled={!nodeChildren[step]?.length} title={nodeChildren[step]?.length ? "This node and everything it builds on" : "A leaf builds on nothing else"}>With prerequisites</button>
+              <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>Full PR</button>
+            </div>
+          ) : (
+            <div className="diff-scope-toggle" role="group" aria-label="Diff scope">
+              <button className={!showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(false)} aria-pressed={!showFullDiff}>This step</button>
+              <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>Full PR</button>
+            </div>
+          )}
+        </div>
+      </div>
+      <h2>{chunk.title}</h2><p>{chunk.description}</p>
+      {treeLayout && replay && <div className="node-relations">
+        {typeof chunk.parent === "number" && <span><em>Used by</em><button onClick={() => go(chunk.parent!)}>{replay.chunks[chunk.parent].title}</button></span>}
+        {nodeChildren[step]?.length
+          ? <span><em>Builds on</em>{nodeChildren[step].map((child) => <button key={child} onClick={() => go(child)}>{replay.chunks[child].title}</button>)}</span>
+          : <span><em>Leaf</em>Relies on nothing else in this pull request</span>}
+      </div>}
+    </div>
+  );
+  const stepFileTabs = chunk && !showFullDiff && stepFiles.length > 0 && (
+      <div className="file-tabs" role="tablist" aria-label="Files in this step">
+        {stepFiles.map((path) => {
+          const lines = rangeLines(scopeRanges.filter((range) => range.file === path));
+          const pending = comments.filter((comment) => comment.path === path).length;
+          const slash = path.lastIndexOf("/");
+          return (
+            <button key={path} role="tab" aria-selected={path === activeFile} className={path === activeFile ? "active" : ""} onClick={() => selectFileTab(path)} title={path}>
+              <code>{slash >= 0 && <span>{path.slice(0, slash + 1)}</span>}{path.slice(slash + 1)}</code>
+              {!isRecorded && <em>{lines} {lines === 1 ? "line" : "lines"}</em>}
+              {pending > 0 && <span className="tab-pending"><MessageSquare size={10} />{pending}</span>}
+            </button>
+          );
+        })}
+      </div>
+  );
+  const stepDiff = (
+    <div className="diff-scroll" ref={scrollRef}>
+      {isRecorded && !showFullDiff ? <>
+        {!recording ? <p className="recording-review-notice">Attach the original recording to see its file changes, or select Full PR to keep reviewing.</p> : <>
+          {step === 0 && <p className="recording-review-notice">Starting snapshot · scope: {recording.session.scope.join(", ")}. Select the next step to review the first changes.</p>}
+          {(recordedEvent?.omitted ?? recording.session.omitted).length > 0 && <details className="recording-review-evidence"><summary>Omitted files at this checkpoint</summary><ul>{(recordedEvent?.omitted ?? recording.session.omitted).map((entry) => <li key={entry.path}><code>{entry.path}</code> — {entry.reason}</li>)}</ul></details>}
+          {recordedEvent?.command && <details className="recording-review-evidence" open><summary>Command result · {recordedEvent.command.exitCode === 0 ? "Passed" : "Failed"}{recordedEvent.command.signal ? ` (${recordedEvent.command.signal})` : ""}</summary><pre>{recordedEvent.command.argv.map((arg) => JSON.stringify(arg)).join(" ")}</pre><pre>{recordedEvent.command.output || "(no output)"}</pre>{recordedEvent.command.truncated && <p>Output truncated by the recorder.</p>}</details>}
+          {recordedEvent && !recordedEvent.changes.length && <p className="recording-review-notice">No file changes at this checkpoint. You can add a note in the review summary or review the full PR.</p>}
+          {recordedEvent?.changes.map((change) => <RecordedReviewFile diffLayout={diffLayout} key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} contentCache={recordingContentCache} ask={lineAsk} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
+        </>}
+      </> : files.map((file) => <ReplayFileView diffLayout={diffLayout} key={file.path} file={file} step={step} currentRanges={scopeRanges} hidden={!showFullDiff && file.path !== activeFile} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} ask={lineAsk} comments={comments} findings={aiFindings} onAdd={addComment} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} />)}
+    </div>
+  );
 
   return (
     <main className="replay-shell">
@@ -1545,7 +1696,17 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           </div>
           <div className="eyebrow"><RotateCcw size={13} /> Ready to reconstruct</div>
           <h2>Rewind #{pull.number}</h2>
-          <p>A model will divide {pull.additions + pull.deletions} changed lines into a plausible implementation order. This is a reconstruction for comprehension—not the author&apos;s actual history.</p>
+          <p>{buildLayout === "tree"
+            ? <>A model will divide {pull.additions + pull.deletions} changed lines into a tree of building blocks: leaves that stand on their own, and the changes that rely on them. This is a reconstruction for comprehension—not the author&apos;s actual design.</>
+            : <>A model will divide {pull.additions + pull.deletions} changed lines into a plausible implementation order. This is a reconstruction for comprehension—not the author&apos;s actual history.</>}</p>
+          <div className="build-layout" role="group" aria-label="Reconstruction shape">
+            <button className={buildLayout === "steps" ? "active" : ""} aria-pressed={buildLayout === "steps"} disabled={building} onClick={() => setBuildLayout("steps")}>
+              <ListOrdered size={16} /><strong>Step by step</strong><span>One sequence you play through in order.</span>
+            </button>
+            <button className={buildLayout === "tree" ? "active" : ""} aria-pressed={buildLayout === "tree"} disabled={building} onClick={() => setBuildLayout("tree")}>
+              <Network size={16} /><strong>Dependency tree <em>Experimental</em></strong><span>Self-contained pieces first, then what builds on them.</span>
+            </button>
+          </div>
           <label className="model-field"><span>OpenRouter model</span><input value={model} onChange={(event) => setModel(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void build(); } }} spellCheck={false} /></label>
           {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
           {building ? (
@@ -1562,13 +1723,71 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           )}
           <div className="pr-context"><Avatar src={pull.author.avatarUrl} alt="" size={22} /><span>Authored by <strong>@{pull.author.login}</strong></span><GitBranch size={13} /><code>{pull.head}</code><ArrowRight size={12} /><code>{pull.base}</code></div>
         </section>
+      ) : treeLayout ? (
+        <div className="replay-grid">
+          <aside className="timeline-panel tree-outline">
+            <div className="timeline-title"><span>Dependency tree</span><em>{replay.chunks.length} nodes</em></div>
+            <ol ref={timelineRef}>
+              {outline.map(({ step: index, depth }) => {
+                const item = replay.chunks[index];
+                return (
+                  <li className={`${index === step ? "active" : ""}${item.impactful ? " impactful" : ""}`} key={index} data-step={index} style={{ "--depth": depth } as React.CSSProperties}>
+                    <button onClick={() => go(index)}>
+                      <span className="step-marker">
+                        {index + 1}
+                        {item.impactful && <Star className="impact-star" size={10} fill="currentColor" aria-hidden="true" />}
+                      </span>
+                      <span>
+                        <span className="step-title-row"><strong>{item.title}</strong></span>
+                        <code>{nodeChildren[index]?.length ? stepFilesLabel(item) : `Leaf · ${stepFilesLabel(item)}`}</code>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+            <div className="timeline-model"><Sparkles size={13} /><span>Replayed by<br /><strong>{replay.model}</strong></span></div>
+          </aside>
+          <section className="code-stage tree-stage">
+            <header className="player-bar tree-bar">
+              <Network size={15} />
+              <strong>{replay.chunks.length} <span>nodes · {nodeChildren.filter((children) => !children.length).length} leaves</span></strong>
+              <span className="tree-hint">Each card relies on the cards beneath it. Start at the leaves and work up.</span>
+              <button className="rebuild-button" onClick={() => { setReplay(null); setNodeOpen(false); }}>Rebuild</button>
+            </header>
+            <DependencyTree chunks={replay.chunks} selected={step} comments={comments} onOpen={(index) => go(index)} />
+            {nodeOpen && chunk && <>
+              <button className="tree-backdrop" aria-label="Close node and return to the tree" tabIndex={-1} onClick={() => { clearLineHash(); setNodeOpen(false); }} />
+              <div className="tree-overlay" role="dialog" aria-label={`Node ${step + 1}: ${chunk.title}`}>
+                <header className="player-bar overlay-bar">
+                  <button className="icon-button" onClick={() => { clearLineHash(); setNodeOpen(false); }} aria-label="Back to the tree" title="Back to the tree (Esc)"><X size={16} /></button>
+                  <nav className="tree-breadcrumb" aria-label="Path from the root">
+                    {treePath(replay.chunks, step).map((index, at, path) => (
+                      <Fragment key={index}>
+                        {at > 0 && <ChevronRight size={12} aria-hidden="true" />}
+                        <button className={index === step ? "current" : ""} aria-current={index === step ? "step" : undefined} onClick={() => go(index)} title={replay.chunks[index].title}>{at === path.length - 1 ? replay.chunks[index].title : index + 1}</button>
+                      </Fragment>
+                    ))}
+                  </nav>
+                  <button className="icon-button" onClick={() => go(step - 1)} disabled={step === 0} aria-label="Previous node in build order" aria-keyshortcuts="Meta+ArrowLeft" title="Previous in build order (⌘←)"><ChevronLeft size={16} /></button>
+                  <strong>{step + 1} <span>/ {replay.chunks.length}</span></strong>
+                  <button className="icon-button" onClick={() => go(step + 1)} disabled={step === replay.chunks.length - 1} aria-label="Next node in build order" aria-keyshortcuts="Meta+ArrowRight" title="Next in build order (⌘→)"><ChevronRight size={16} /></button>
+                </header>
+                {stepNarration}
+                {stepFileTabs}
+                {stepDiff}
+              </div>
+            </>}
+          </section>
+          {reviewSidebar}
+        </div>
       ) : (
         <div className="replay-grid">
           <aside className="timeline-panel">
             <div className="timeline-title"><span>{isRecorded ? "Recorded checkpoints" : "Reconstruction"}</span><em>{replay.chunks.length} steps</em></div>
             <ol ref={timelineRef}>
               {replay.chunks.map((item, index) => (
-                <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={index}>
+                <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={index} data-step={index}>
                   <button onClick={() => go(index)}>
                     <span className="step-marker">
                       {index < step ? <Check size={12} /> : index + 1}
@@ -1593,55 +1812,11 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
               <strong>{step + 1} <span>/ {replay.chunks.length}</span></strong>
               {!isRecorded && <button className="rebuild-button" onClick={() => { setReplay(null); setPlaying(false); }}>Rebuild</button>}
             </header>
-            {chunk && <div className="step-narration">
-              <div className="step-narration-top">
-                <div className="step-meta">
-                  <span>Step {step + 1}</span>
-                  {chunk.impactful && <span className="impact-label"><Star size={10} fill="currentColor" aria-hidden="true" />High impact</span>}
-                  <code>{stepFilesLabel(chunk)}</code>
-                </div>
-                <div className="diff-view-controls">
-                  <div className="diff-scope-toggle" role="group" aria-label="Diff layout">
-                    <button className={diffLayout === "unified" ? "active" : ""} onClick={() => setDiffLayout("unified")} aria-pressed={diffLayout === "unified"}>Unified</button>
-                    <button className={diffLayout === "split" ? "active" : ""} onClick={() => setDiffLayout("split")} aria-pressed={diffLayout === "split"}>Side by side</button>
-                  </div>
-                  <div className="diff-scope-toggle" role="group" aria-label="Diff scope">
-                    <button className={!showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(false)} aria-pressed={!showFullDiff}>This step</button>
-                    <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>Full PR</button>
-                  </div>
-                </div>
-              </div>
-              <h2>{chunk.title}</h2><p>{chunk.description}</p>
-            </div>}
-            {chunk && !showFullDiff && stepFiles.length > 0 && (
-              <div className="file-tabs" role="tablist" aria-label="Files in this step">
-                {stepFiles.map((path) => {
-                  const lines = chunk.ranges.filter((range) => range.file === path).reduce((sum, range) => sum + range.end - range.start + 1, 0);
-                  const pending = comments.filter((comment) => comment.path === path).length;
-                  const slash = path.lastIndexOf("/");
-                  return (
-                    <button key={path} role="tab" aria-selected={path === activeFile} className={path === activeFile ? "active" : ""} onClick={() => selectFileTab(path)} title={path}>
-                      <code>{slash >= 0 && <span>{path.slice(0, slash + 1)}</span>}{path.slice(slash + 1)}</code>
-                      {!isRecorded && <em>{lines} {lines === 1 ? "line" : "lines"}</em>}
-                      {pending > 0 && <span className="tab-pending"><MessageSquare size={10} />{pending}</span>}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-            <div className="diff-scroll" ref={scrollRef}>
-              {isRecorded && !showFullDiff ? <>
-                {!recording ? <p className="recording-review-notice">Attach the original recording to see its file changes, or select Full PR to keep reviewing.</p> : <>
-                  {step === 0 && <p className="recording-review-notice">Starting snapshot · scope: {recording.session.scope.join(", ")}. Select the next step to review the first changes.</p>}
-                  {(recordedEvent?.omitted ?? recording.session.omitted).length > 0 && <details className="recording-review-evidence"><summary>Omitted files at this checkpoint</summary><ul>{(recordedEvent?.omitted ?? recording.session.omitted).map((entry) => <li key={entry.path}><code>{entry.path}</code> — {entry.reason}</li>)}</ul></details>}
-                  {recordedEvent?.command && <details className="recording-review-evidence" open><summary>Command result · {recordedEvent.command.exitCode === 0 ? "Passed" : "Failed"}{recordedEvent.command.signal ? ` (${recordedEvent.command.signal})` : ""}</summary><pre>{recordedEvent.command.argv.map((arg) => JSON.stringify(arg)).join(" ")}</pre><pre>{recordedEvent.command.output || "(no output)"}</pre>{recordedEvent.command.truncated && <p>Output truncated by the recorder.</p>}</details>}
-                  {recordedEvent && !recordedEvent.changes.length && <p className="recording-review-notice">No file changes at this checkpoint. You can add a note in the review summary or review the full PR.</p>}
-                  {recordedEvent?.changes.map((change) => <RecordedReviewFile diffLayout={diffLayout} key={`${recording.session.id}-${step}-${change.path}`} change={change} canonical={files.find((file) => file.path === change.path || file.oldPath === change.path)} pull={pull} step={step} hidden={change.path !== activeFile} contentCache={recordingContentCache} ask={lineAsk} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} onHistoricalComment={(line, side, body) => setReviewSummary((current) => [current.trim(), historicalReviewNote(recordedEvent, change.path, line, side, body)].filter(Boolean).join("\n\n---\n\n"))} />)}
-                </>}
-              </> : files.map((file) => <ReplayFileView diffLayout={diffLayout} key={file.path} file={file} step={step} currentRanges={chunk?.ranges ?? []} hidden={!showFullDiff && file.path !== activeFile} showFullDiff={showFullDiff} contentRepo={file.status === "deleted" ? pull.baseRepo : pull.headRepo} contentRef={file.status === "deleted" ? pull.baseSha : pull.headSha} ask={lineAsk} comments={comments} findings={aiFindings} onAdd={(comment) => setComments((items) => [...items, { ...comment, id: crypto.randomUUID() }])} onAddFinding={addFinding} onUpdate={updateComment} onDelete={deleteComment} />)}
-            </div>
+            {stepNarration}
+            {stepFileTabs}
+            {stepDiff}
           </section>
-          <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />
+          {reviewSidebar}
         </div>
       )}
     </main>

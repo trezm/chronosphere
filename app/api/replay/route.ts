@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
     const apiKey = session.openrouter?.apiKey;
     if (!apiKey) throw new Error("OpenRouter authentication is required.");
     const token = await githubToken(request);
-    const input = (await request.json()) as { repo?: string; number?: number; model?: string };
+    const input = (await request.json()) as { repo?: string; number?: number; model?: string; layout?: string };
     const { fullName } = parseRepo(input.repo ?? null);
     const number = parsePullNumber(input.number);
     context = { repo: fullName, number, model: input.model?.trim() || undefined };
@@ -74,6 +74,7 @@ export async function POST(request: NextRequest) {
         try {
           const replay = await buildReplay(detail, apiKey, {
             model: input.model,
+            layout: input.layout === "tree" ? "tree" : undefined,
             signal: request.signal,
             onProgress: (chars) => {
               const now = Date.now();
