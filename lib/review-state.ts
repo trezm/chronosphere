@@ -24,6 +24,8 @@ export interface PullRequestState {
   scoutModel?: string;
   reviewerModel?: string;
   review?: ReviewDraft;
+  /** Tree replays: the steps the reviewer has marked as viewed. */
+  viewed?: number[];
 }
 
 function isReviewDraft(value: unknown): value is ReviewDraft {
@@ -49,7 +51,8 @@ export function isPullRequestState(value: unknown): value is PullRequestState {
     && (state.aiReview === undefined || isAiReview(state.aiReview))
     && (state.scoutModel === undefined || typeof state.scoutModel === "string")
     && (state.reviewerModel === undefined || typeof state.reviewerModel === "string")
-    && (state.review === undefined || isReviewDraft(state.review));
+    && (state.review === undefined || isReviewDraft(state.review))
+    && (state.viewed === undefined || (Array.isArray(state.viewed) && state.viewed.every((index) => Number.isInteger(index) && index >= 0)));
 }
 
 export function migrateInProgressReview(review: InProgressReview): PullRequestState {

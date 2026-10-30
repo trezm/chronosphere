@@ -456,6 +456,26 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .tree-node code { font-size: 10px; color: var(--faint); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .tree-node em { font: 500 10px var(--font-mono), monospace; font-style: normal; color: var(--muted); }
 
+/* Viewed nodes: checked off as the reviewer works through the tree. */
+.tree-node.viewed:not(.active) { opacity: 0.62; }
+.tree-node.viewed:hover { opacity: 1; }
+.tree-node.viewed .step-marker { background: var(--green-accent); border-color: var(--green-accent); color: #ffffff; }
+.tree-node-viewed { margin-left: auto; display: inline-flex; align-items: center; gap: 3px; color: var(--green); font: 600 9px var(--font-mono), monospace; text-transform: uppercase; letter-spacing: 0.08em; }
+.tree-node .tab-pending + .tree-node-viewed { margin-left: 0; }
+.tree-outline li.viewed .step-marker { background: var(--green-accent); border-color: var(--green-accent); color: #ffffff; }
+.tree-outline li.viewed:not(.active) button strong { color: var(--faint); }
+.tree-progress { flex: none; display: inline-flex; align-items: center; gap: 8px; font: 500 11px var(--font-mono), monospace; color: var(--muted); white-space: nowrap; }
+.tree-progress.complete { color: var(--green); }
+.tree-progress-track { width: 64px; height: 4px; border-radius: var(--radius-full); background: var(--surface-3); overflow: hidden; }
+.tree-progress-track span { display: block; height: 100%; background: var(--green-accent); transition: width 0.2s ease; }
+.viewed-toggle { flex: none; display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 600; cursor: pointer; }
+.viewed-toggle:hover { background: var(--surface-3); }
+.viewed-toggle.checked { border-color: var(--green-border); background: var(--green-soft); color: var(--green); }
+.viewed-box { width: 14px; height: 14px; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--surface); }
+.viewed-toggle.checked .viewed-box { border-color: var(--green-accent); background: var(--green-accent); color: #ffffff; }
+.next-unviewed { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; }
+.next-unviewed:disabled { opacity: 0.4; cursor: default; }
+
 /* A node's diff slides over the tree; a sliver of tree stays visible behind it. */
 .tree-backdrop { position: absolute; inset: 0; z-index: 19; border: 0; padding: 0; background: color-mix(in srgb, var(--ink) 14%, transparent); cursor: pointer; }
 .tree-overlay { position: absolute; inset: 0 0 0 36px; z-index: 20; display: flex; flex-direction: column; min-width: 0; background: var(--bg); border-left: 1px solid var(--border-strong); box-shadow: var(--shadow-lg); animation: tree-overlay-in 0.16s ease-out; }
@@ -733,6 +753,7 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
   .code-stage { height: 68vh; height: 68dvh; flex: none; }
   .tree-overlay { inset: 0; }
   .tree-hint { display: none; }
+  .next-unviewed { display: none; }
   .build-layout { grid-template-columns: 1fr; }
   .review-sidebar { display: block; position: static; width: auto; max-height: none; flex: none; box-shadow: none; border-left: 0; border-top: 1px solid var(--border); }
   .inline-composer, .inline-draft, .inline-finding, .line-thread { padding-left: 12px; }

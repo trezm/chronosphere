@@ -38,3 +38,12 @@ test("playback remains valid after a completed review without persisting an empt
     review: { comments: [], summary: "", event: "COMMENT" },
   }), false);
 });
+
+test("keeps the tree nodes a reviewer marked as viewed", () => {
+  const state = migrateInProgressReview(legacy);
+
+  assert.equal(isPullRequestState({ ...state, viewed: [0, 2] }), true);
+  assert.equal(isPullRequestState({ ...state, viewed: [-1] }), false);
+  assert.equal(isPullRequestState({ ...state, viewed: ["0"] }), false);
+  assert.equal(isPullRequestState({ ...state, viewed: 1 }), false);
+});
