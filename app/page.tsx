@@ -435,10 +435,11 @@ function rangeLines(ranges: readonly ReplayRange[]): number {
  * The dependency tree drawn root-first: every card relies on the cards that
  * hang beneath it, so reading bottom-up follows the build.
  */
-function DependencyTree({ chunks, selected, comments, onOpen }: {
+function DependencyTree({ chunks, selected, comments, viewed, onOpen }: {
   chunks: ReplayChunk[];
   selected: number | null;
   comments: PendingComment[];
+  viewed: ReadonlySet<number>;
   onOpen: (step: number) => void;
 }) {
   const children = useMemo(() => treeChildren(chunks), [chunks]);
@@ -450,11 +451,12 @@ function DependencyTree({ chunks, selected, comments, onOpen }: {
     const lines = rangeLines(chunk.ranges);
     return (
       <li key={index}>
-        <button className={`tree-node${index === selected ? " active" : ""}${chunk.impactful ? " impactful" : ""}${below.length ? "" : " leaf"}`} onClick={() => onOpen(index)} aria-label={`Open node ${index + 1}: ${chunk.title}`}>
+        <button className={`tree-node${index === selected ? " active" : ""}${chunk.impactful ? " impactful" : ""}${below.length ? "" : " leaf"}${viewed.has(index) ? " viewed" : ""}`} onClick={() => onOpen(index)} aria-label={`Open node ${index + 1}: ${chunk.title}${viewed.has(index) ? " (viewed)" : ""}`}>
           <span className="tree-node-top">
             <span className="step-marker">{index + 1}{chunk.impactful && <Star className="impact-star" size={10} fill="currentColor" aria-hidden="true" />}</span>
             <span className="tree-node-kind">{below.length ? `Builds on ${below.length}` : "Leaf"}</span>
             {pending > 0 && <span className="tab-pending"><MessageSquare size={10} />{pending}</span>}
+            {viewed.has(index) && <span className="tree-node-viewed"><Check size={11} />Viewed</span>}
           </span>
           <strong>{chunk.title}</strong>
           <code>{stepFilesLabel(chunk)}</code>
@@ -1155,6 +1157,8 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const [buildLayout, setBuildLayout] = useState<"steps" | "tree">("steps");
   const [nodeOpen, setNodeOpen] = useState(initialStep !== null);
   const [treeScope, setTreeScope] = useState<"node" | "subtree">("node");
+  // Tree nodes the reviewer has marked as viewed, kept sorted.
+  const [viewed, setViewed] = useState<number[]>([]);
   // The file tab chosen for one step; any other step falls back to its first file.
   const [fileTab, setFileTab] = useState<{ step: number; file: string } | null>(null);
   const [pendingLineAnchor, setPendingLineAnchor] = useState<{ path: string; line: number } | null>(null);
@@ -1209,6 +1213,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           setReviewEvent(cached.review?.event ?? "COMMENT");
           setModel(cached.model);
           setShowFullDiff(cached.showFullDiff);
+          setViewed(isTreeReplay(cached.replay) ? (cached.viewed ?? []).filter((index) => index < cached.replay.chunks.length) : []);
           setAiReview(cached.aiReview ?? null);
           setScoutModel(cached.scoutModel ?? cached.aiReview?.scoutModel ?? defaultScoutModel);
           setReviewerModel(cached.reviewerModel ?? cached.aiReview?.reviewerModel ?? defaultReviewerModel);
@@ -1280,6 +1285,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     if (comments.length || reviewSummary.trim()) {
       state.review = { comments, summary: reviewSummary, event: reviewEvent };
     }
+    if (viewed.length) state.viewed = viewed;
     const timer = window.setTimeout(async () => {
       const revision = Math.max(stateRevisionRef.current + 1, Date.now());
       stateRevisionRef.current = revision;
@@ -1302,7 +1308,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
       }
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [aiReview, cacheKey, comments, model, number, pull, replay, repo, reviewEvent, reviewSummary, reviewerModel, scoutModel, showFullDiff, stateReady, step]);
+  }, [aiReview, cacheKey, comments, model, number, pull, replay, repo, reviewEvent, reviewSummary, reviewerModel, scoutModel, showFullDiff, stateReady, step, viewed]);
   useEffect(() => {
     if (!playing || !replay) return;
     if (step >= replay.chunks.length - 1) {
@@ -1357,7 +1363,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         else built = event.replay;
       }
       if (!built) throw new Error("The replay stream ended before it finished.");
-      aiReplayRef.current = built; setReplay(built); setStep(0); setNodeOpen(false); setTreeScope("node");
+      aiReplayRef.current = built; setReplay(built); setStep(0); setNodeOpen(false); setTreeScope("node"); setViewed([]);
     } catch (error) {
       if (controller.signal.aborted) return;
       setError(error instanceof Error ? error.message : "Could not build replay.");
@@ -1383,6 +1389,14 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const stepFiles = useMemo(() => chunk ? chunk.files ?? chunkFiles({ ranges: scopeRanges }) : [], [chunk, scopeRanges]);
   const nodeChildren = useMemo(() => treeLayout && replay ? treeChildren(replay.chunks) : [], [replay, treeLayout]);
   const outline = useMemo(() => treeLayout && replay ? treeOutline(replay.chunks) : [], [replay, treeLayout]);
+  const viewedSet = useMemo(() => new Set(viewed), [viewed]);
+  const toggleViewed = (index: number) => setViewed((items) => items.includes(index)
+    ? items.filter((item) => item !== index)
+    : [...items, index].sort((a, b) => a - b));
+  // The next node in build order still to review, wrapping past the end.
+  const nextUnviewed = replay
+    ? Array.from({ length: replay.chunks.length }, (_, offset) => (step + 1 + offset) % replay.chunks.length).find((index) => index !== step && !viewedSet.has(index)) ?? null
+    : null;
   const activeFile = fileTab?.step === step && stepFiles.includes(fileTab.file) ? fileTab.file : stepFiles[0] ?? null;
   const changeSteps = useMemo(() => replayStepMap(replay?.chunks ?? []), [replay?.chunks]);
   const aiFindings = useMemo(() => sortFindings(aiReview?.findings ?? []), [aiReview]);
@@ -1731,10 +1745,10 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
               {outline.map(({ step: index, depth }) => {
                 const item = replay.chunks[index];
                 return (
-                  <li className={`${index === step ? "active" : ""}${item.impactful ? " impactful" : ""}`} key={index} data-step={index} style={{ "--depth": depth } as React.CSSProperties}>
+                  <li className={`${index === step ? "active" : ""}${item.impactful ? " impactful" : ""}${viewedSet.has(index) ? " viewed" : ""}`} key={index} data-step={index} style={{ "--depth": depth } as React.CSSProperties}>
                     <button onClick={() => go(index)}>
-                      <span className="step-marker">
-                        {index + 1}
+                      <span className="step-marker" aria-label={viewedSet.has(index) ? `Node ${index + 1}, viewed` : undefined}>
+                        {viewedSet.has(index) ? <Check size={12} /> : index + 1}
                         {item.impactful && <Star className="impact-star" size={10} fill="currentColor" aria-hidden="true" />}
                       </span>
                       <span>
@@ -1752,10 +1766,14 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
             <header className="player-bar tree-bar">
               <Network size={15} />
               <strong>{replay.chunks.length} <span>nodes · {nodeChildren.filter((children) => !children.length).length} leaves</span></strong>
+              <span className={`tree-progress${viewed.length === replay.chunks.length ? " complete" : ""}`} role="status">
+                <span className="tree-progress-track" aria-hidden="true"><span style={{ width: `${(viewed.length / replay.chunks.length) * 100}%` }} /></span>
+                {viewed.length} of {replay.chunks.length} viewed
+              </span>
               <span className="tree-hint">Each card relies on the cards beneath it. Start at the leaves and work up.</span>
               <button className="rebuild-button" onClick={() => { setReplay(null); setNodeOpen(false); }}>Rebuild</button>
             </header>
-            <DependencyTree chunks={replay.chunks} selected={step} comments={comments} onOpen={(index) => go(index)} />
+            <DependencyTree chunks={replay.chunks} selected={step} comments={comments} viewed={viewedSet} onOpen={(index) => go(index)} />
             {nodeOpen && chunk && <>
               <button className="tree-backdrop" aria-label="Close node and return to the tree" tabIndex={-1} onClick={() => { clearLineHash(); setNodeOpen(false); }} />
               <div className="tree-overlay" role="dialog" aria-label={`Node ${step + 1}: ${chunk.title}`}>
@@ -1769,6 +1787,10 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                       </Fragment>
                     ))}
                   </nav>
+                  <button className={`viewed-toggle${viewedSet.has(step) ? " checked" : ""}`} aria-pressed={viewedSet.has(step)} onClick={() => toggleViewed(step)} title={viewedSet.has(step) ? "Mark this node as not viewed" : "Mark this node as viewed"}>
+                    <span className="viewed-box" aria-hidden="true">{viewedSet.has(step) && <Check size={11} strokeWidth={3} />}</span>Viewed
+                  </button>
+                  <button className="text-button next-unviewed" onClick={() => nextUnviewed !== null && go(nextUnviewed)} disabled={nextUnviewed === null} title={nextUnviewed === null ? "Every other node is viewed" : `Open ${replay.chunks[nextUnviewed].title}`}>Next unviewed<ArrowRight size={12} /></button>
                   <button className="icon-button" onClick={() => go(step - 1)} disabled={step === 0} aria-label="Previous node in build order" aria-keyshortcuts="Meta+ArrowLeft" title="Previous in build order (⌘←)"><ChevronLeft size={16} /></button>
                   <strong>{step + 1} <span>/ {replay.chunks.length}</span></strong>
                   <button className="icon-button" onClick={() => go(step + 1)} disabled={step === replay.chunks.length - 1} aria-label="Next node in build order" aria-keyshortcuts="Meta+ArrowRight" title="Next in build order (⌘→)"><ChevronRight size={16} /></button>
