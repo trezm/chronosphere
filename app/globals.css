@@ -164,13 +164,19 @@ code, .line-number { font-family: var(--font-mono), monospace; }
    App header
    ========================================================================== */
 
-.app-header { height: 56px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; border-bottom: 1px solid var(--border); background: var(--header-bg); backdrop-filter: blur(14px); position: relative; z-index: 50; }
-.brand { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 650; letter-spacing: -0.02em; }
+.app-header { height: 56px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 20px; border-bottom: 1px solid var(--border); background: var(--header-bg); backdrop-filter: blur(14px); position: relative; z-index: 50; }
+.brand { flex: none; display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 650; letter-spacing: -0.02em; }
 .brand-mark { width: 28px; height: 28px; border: 1.5px solid var(--ink); border-radius: 50%; display: grid; place-items: center; position: relative; color: var(--ink); }
 .brand-mark span { position: absolute; inset: 4px; border: 1px solid var(--lime-dark); border-radius: 50%; border-left-color: transparent; transform: rotate(-28deg); }
 .header-right, .viewer-pill, .auth-badges, .pr-stats, .pr-identity, .people, .assignment-row, .pr-meta { display: flex; align-items: center; }
-.header-right { gap: 16px; }
+.header-right { gap: 16px; min-width: 0; }
 .header-context { color: var(--muted); font-size: 12px; }
+/* The links give way first when the header runs out of room, scrolling sideways
+   rather than pushing the account controls off screen. The padding keeps focus
+   outlines inside the scroll box. */
+.header-links { display: flex; align-items: center; gap: 16px; min-width: 0; overflow-x: auto; scrollbar-width: none; padding: 4px; margin: -4px; }
+.header-links::-webkit-scrollbar { display: none; }
+.header-links .recording-home { white-space: nowrap; }
 .viewer-pill { gap: 8px; border-left: 1px solid var(--border); padding-left: 16px; font-size: 12px; }
 .avatar { border-radius: 50%; object-fit: cover; background: var(--surface-3); flex: none; }
 .icon-button { border: 1px solid var(--border-strong); background: var(--surface); color: var(--ink); width: 32px; height: 32px; border-radius: var(--radius-md); display: grid; place-items: center; cursor: pointer; }
@@ -776,6 +782,14 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
   .build-layout { grid-template-columns: 1fr; }
   .review-sidebar { display: block; position: static; width: auto; max-height: none; flex: none; box-shadow: none; border-left: 0; border-top: 1px solid var(--border); }
   .inline-composer, .inline-draft, .inline-finding, .line-thread { padding-left: 12px; }
+}
+@media (max-width: 520px) {
+  /* Phone width: the logo mark alone, so the header links fit on one line. */
+  .brand > span { display: none; }
+  .header-right, .header-links { gap: 12px; }
+  .header-links .recording-home { font-size: 13px; }
+  .header-links .recording-home svg { display: none; }
+  .viewer-pill { padding-left: 12px; }
 }
 
 /* Local recording viewer: preserve the review workspace palette and typography. */
