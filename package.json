@@ -15,6 +15,7 @@
     "db:generate": "drizzle-kit generate",
     "record": "node --experimental-strip-types scripts/record.mjs",
     "record:demo": "node scripts/record-demo.mjs",
+    "review": "node --experimental-strip-types scripts/review.mjs",
     "skills:export": "node scripts/export-skills.mjs"
   },
   "dependencies": {

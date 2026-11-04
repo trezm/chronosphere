@@ -38,13 +38,15 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, Fragment, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { parseRecording, RECORDING_MAX_BYTES, type RecordedChange, type Recording } from "@/lib/recording";
 import { finalLineMaps, historicalReviewNote, recordedChangeDiff, recordedLineAnchor, recordingReplay, type FinalLineMaps, type ReviewAnchor } from "@/lib/recording-review";
 import { PR_RECORDING_PATH } from "@/lib/pr-recording";
 import { api, authorizedFetch, onGithubSessionExpired } from "@/lib/api";
+import { bridgeRequest, fileReplay, isLocalReviewSession, localBridgeFragment, localPullDetail, parseLocalBridge, type LocalBridge, type LocalReviewSession } from "@/lib/local-review";
 import { chunkFiles, inRanges, parseUnifiedDiff, replayStepMap, sideBySideRows, sideBySideStepRows, stepLineVisible } from "@/lib/diff";
 import { loadRepoRecency, orderByRecency, recordRepoOpened } from "@/lib/repo-recency";
 import { readReplayEvents } from "@/lib/replay-stream";
@@ -161,10 +163,12 @@ function Brand() {
 
 function AppHeader({
   auth,
+  context = "PRs, reconstructed",
   onToggleTheme,
   onLogout,
 }: {
   auth: AuthState | null;
+  context?: string;
   onToggleTheme: () => void;
   onLogout: () => void;
 }) {
@@ -174,7 +178,7 @@ function AppHeader({
       <div className="header-right">
         <a className="recording-home" href="https://github.com/trezm/chronosphere-skills" target="_blank" rel="noreferrer">Agent skills <ExternalLink size={12} /></a>
         <Link className="recording-home" href="/recordings">Open recording</Link>
-        <span className="header-context">PRs, reconstructed</span>
+        <span className="header-context">{context}</span>
         <button className="icon-button quiet theme-toggle" onClick={onToggleTheme} aria-label="Toggle color mode" title="Toggle color mode">
           <Moon className="moon-icon" size={15} /><Sun className="sun-icon" size={15} />
         </button>
@@ -522,6 +526,14 @@ type LineAsk = {
   onClose: (id: string) => void;
 };
 
+/** Reads one version of a file: from GitHub for pull requests, from the review command for local changes. */
+type ReadFile = (repo: string, ref: string, path: string) => Promise<string>;
+
+const readGithubFile: ReadFile = async (repo, ref, path) =>
+  (await api<{ content: string }>(`/api/github/file?${new URLSearchParams({ repo, ref, path })}`)).content;
+
+const FileReaderContext = createContext<ReadFile>(readGithubFile);
+
 function ReplayFileView({
   file,
   step,
@@ -577,6 +589,7 @@ function ReplayFileView({
   const [expanding, setExpanding] = useState<string | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
   const contentLinesRef = useRef<string[] | null>(null);
+  const readFile = useContext(FileReaderContext);
   const syntaxLanguage = useMemo(
     () => languageForPath(file.path, file.hunks.flatMap((hunk) => hunk.lines.map((line) => line.text)).join("\n")),
     [file.hunks, file.path]
@@ -629,8 +642,7 @@ function ReplayFileView({
   const hunkBoundsAt = (index: number) => bounds(file.hunks[index].lines, file.hunks[index].header);
   const loadContent = async () => {
     if (contentLinesRef.current) return contentLinesRef.current;
-    const query = new URLSearchParams({ repo: contentRepo, ref: contentRef, path: usesOldContent ? (file.oldPath ?? file.path) : file.path });
-    const { content } = localContent !== undefined ? { content: localContent } : await api<{ content: string }>(`/api/github/file?${query}`);
+    const content = localContent ?? await readFile(contentRepo, contentRef, usesOldContent ? (file.oldPath ?? file.path) : file.path);
     const lines = content.replace(/\r\n/g, "\n").split("\n");
     if (lines.at(-1) === "") lines.pop();
     contentLinesRef.current = lines;
@@ -859,9 +871,10 @@ function RecordedReviewFile({ change, canonical, pull, step, hidden, contentCach
   onAddFinding: (finding: ReviewFinding) => void;
   onUpdate: (id: string, body: string) => void; onDelete: (id: string) => void;
   onHistoricalComment: (line: number, side: "LEFT" | "RIGHT", body: string) => void;
-  ask: LineAsk;
+  ask?: LineAsk;
 }) {
   const file = useMemo(() => recordedChangeDiff(change), [change]);
+  const readFile = useContext(FileReaderContext);
   const [lineMaps, setLineMaps] = useState<FinalLineMaps | null>(null);
   const [verificationError, setVerificationError] = useState(false);
   useEffect(() => {
@@ -869,7 +882,7 @@ function RecordedReviewFile({ change, canonical, pull, step, hidden, contentCach
     let active = true;
     async function content(repo: string, ref: string, path: string) {
       const query = new URLSearchParams({ repo, ref, path }).toString();
-      if (!contentCache.has(query)) contentCache.set(query, api<{ content: string }>(`/api/github/file?${query}`).then(({ content }) => content).catch((error) => { contentCache.delete(query); throw error; }));
+      if (!contentCache.has(query)) contentCache.set(query, readFile(repo, ref, path).catch((error) => { contentCache.delete(query); throw error; }));
       return contentCache.get(query)!;
     }
     const check = async () => {
@@ -887,10 +900,10 @@ function RecordedReviewFile({ change, canonical, pull, step, hidden, contentCach
     };
     void check();
     return () => { active = false; };
-  }, [canonical, change, contentCache, hidden, pull.baseRepo, pull.baseSha, pull.headRepo, pull.headSha]);
+  }, [canonical, change, contentCache, hidden, pull.baseRepo, pull.baseSha, pull.headRepo, pull.headSha, readFile]);
   return <div hidden={hidden}>
     {verificationError && <p className="recording-review-notice">PR line verification is unavailable for this file. Comments will be added to the review summary.</p>}
-    {!file.hunks.length ? <p className="recording-review-notice"><code>{change.path}</code>: {file.status}; no visible line changes (empty file or line-ending change).</p> : <ReplayFileView {...actions} file={file} step={step} currentRanges={[{ file: file.path, start: 1, end: file.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.changedIndex !== null).length }]} showFullDiff contentRepo="" contentRef="" localContent={change.after?.content ?? change.before?.content ?? ""} resolveComment={(line) => recordedLineAnchor(line, canonical, lineMaps ?? {})} commentingDisabled={lineMaps === null} ask={{ ...actions.ask, scope: `recorded-${step}`, recorded: { before: change.before?.content, after: change.after?.content, step: `step ${step + 1}` } }} />}
+    {!file.hunks.length ? <p className="recording-review-notice"><code>{change.path}</code>: {file.status}; no visible line changes (empty file or line-ending change).</p> : <ReplayFileView {...actions} file={file} step={step} currentRanges={[{ file: file.path, start: 1, end: file.hunks.flatMap((hunk) => hunk.lines).filter((line) => line.changedIndex !== null).length }]} showFullDiff contentRepo="" contentRef="" localContent={change.after?.content ?? change.before?.content ?? ""} resolveComment={(line) => recordedLineAnchor(line, canonical, lineMaps ?? {})} commentingDisabled={lineMaps === null} ask={actions.ask && { ...actions.ask, scope: `recorded-${step}`, recorded: { before: change.before?.content, after: change.after?.content, step: `step ${step + 1}` } }} />}
   </div>;
 }
 
@@ -918,6 +931,7 @@ function ReviewSidebar({
   onDeleteComment,
   onSubmitted,
   onMerged,
+  local,
 }: {
   repo: string;
   pull: PullRequestDetail;
@@ -942,8 +956,11 @@ function ReviewSidebar({
   onDeleteComment: (id: string) => void;
   onSubmitted: () => void;
   onMerged: () => void;
+  /** Local reviews go back to the waiting review command instead of GitHub, once. */
+  local?: LocalBridge;
 }) {
   const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [mergeMethod, setMergeMethod] = useState<"merge" | "squash" | "rebase">(
     pull.allowedMergeMethods.includes("squash") ? "squash" : (pull.allowedMergeMethods[0] ?? "squash")
@@ -971,15 +988,27 @@ function ReviewSidebar({
     onDeleteComment(id);
   };
 
+  // An agent can act on a bare approval; GitHub needs a summary or a comment.
+  const canSubmit = !sent && (comments.length > 0 || !!summary.trim() || (!!local && event === "APPROVE"));
   const submitReview = async () => {
-    if (busy || (!comments.length && !summary.trim())) return;
+    if (busy || !canSubmit) return;
     setBusy(true); setMessage(null);
     try {
-      await api("/api/github/review", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo, number: pull.number, event, body: summary, commitId: pull.headSha, comments }),
-      });
-      setMessage("Review posted to GitHub."); onSubmitted();
+      if (local) {
+        await bridgeRequest(local, "/review", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ event, body: summary, headSha: pull.headSha, comments }),
+        });
+        setSent(true);
+        setMessage("Review sent to the agent. You can close this tab.");
+      } else {
+        await api("/api/github/review", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo, number: pull.number, event, body: summary, commitId: pull.headSha, comments }),
+        });
+        setMessage("Review posted to GitHub.");
+      }
+      onSubmitted();
     } catch (error) { setMessage(error instanceof Error ? error.message : "Review failed."); }
     finally { setBusy(false); }
   };
@@ -1008,7 +1037,7 @@ function ReviewSidebar({
 
   return (
     <aside className="review-sidebar">
-      <section className="review-section ai-review-section">
+      {!local && <section className="review-section ai-review-section">
         <div className="section-title"><span><Sparkles size={13} /> AI review</span>{aiReview && <em>{findings.length}</em>}</div>
         {!aiReview ? (
           <>
@@ -1053,7 +1082,7 @@ function ReviewSidebar({
             <button className="text-button ai-rerun" onClick={onRequestAiReview} disabled={aiReviewBusy}>{aiReviewBusy ? "Reviewing again…" : "Run review again"}</button>
           </>
         )}
-      </section>
+      </section>}
       <section className="review-section pending-section">
         <div className="section-title"><span>Pending comments</span><em>{comments.length}</em></div>
         <div className="comment-list">
@@ -1077,15 +1106,15 @@ function ReviewSidebar({
             </div>
           ))}
         </div>
-        <textarea className="review-summary" value={summary} onChange={(e) => onSummaryChange(e.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void submitReview(); } }} placeholder="Add an overall review summary…" />
+        <textarea className="review-summary" value={summary} disabled={sent} onChange={(e) => onSummaryChange(e.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void submitReview(); } }} placeholder={local ? "Tell the agent what to do next…" : "Add an overall review summary…"} />
         <div className="review-events">
           {([['COMMENT', 'Comment', MessageSquare], ['APPROVE', 'Approve', CheckCircle2], ['REQUEST_CHANGES', 'Changes', XCircle]] as const).map(([value, label, Icon]) => (
-            <button key={value} className={event === value ? "active" : ""} onClick={() => onEventChange(value)}><Icon size={14} />{label}</button>
+            <button key={value} className={event === value ? "active" : ""} disabled={sent} onClick={() => onEventChange(value)}><Icon size={14} />{label}</button>
           ))}
         </div>
-        <button className="primary-button full" onClick={submitReview} disabled={busy || (!comments.length && !summary.trim())}>{busy ? "Submitting…" : `Submit review · ${comments.length} comment${comments.length === 1 ? "" : "s"}`}</button>
+        <button className="primary-button full" onClick={submitReview} disabled={busy || !canSubmit}>{sent ? "Sent to agent" : busy ? "Submitting…" : `${local ? "Send to agent" : "Submit review"} · ${comments.length} comment${comments.length === 1 ? "" : "s"}`}</button>
       </section>
-      <section className="review-section merge-section">
+      {!local && <section className="review-section merge-section">
         <div className="section-title"><span>Merge status</span><em className={mergeTone}>{mergeLabel}</em></div>
         <div className="merge-facts">
           <div><span>Conflicts</span><strong>{pull.mergeable === false ? <><XCircle size={14} /> Present</> : pull.mergeable === null ? "Calculating…" : <><Check size={14} /> None</>}</strong></div>
@@ -1104,8 +1133,8 @@ function ReviewSidebar({
             {confirmMerge && <button className="text-button cancel-confirm" onClick={() => setConfirmMerge(false)}>Cancel</button>}
           </>
         )}
-      </section>
-      {message && <div className={`sidebar-message ${/failed|required|error|conflict|refused/i.test(message) ? "error" : ""}`}>{message}</div>}
+      </section>}
+      {message && <div className={`sidebar-message ${/failed|required|error|conflict|refused|could not|different snapshot/i.test(message) ? "error" : ""}`}>{message}</div>}
     </aside>
   );
 }
@@ -1119,9 +1148,12 @@ function buildStageLabel(stage: BuildStage, chars: number, model: string): strin
   return `Reconstructing — ${size} characters so far…`;
 }
 
-type RecordingAttachment = { recording: Recording; name: string; headSha: string; origin: "upload" | "repository" | "gist" | "comment"; url?: string };
+type RecordingAttachment = { recording: Recording; name: string; headSha: string; origin: "upload" | "repository" | "gist" | "comment" | "local"; url?: string };
 
-function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, aiAvailable, onStepChange, onBack }: { repo: string; number: number; initialStep: number | null; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; aiAvailable: boolean; onStepChange: (step: number) => void; onBack: () => void }) {
+/** A snapshot served by the review command on this computer, reviewed in place of a pull request. */
+type LocalReview = { bridge: LocalBridge; session: LocalReviewSession };
+
+function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScoutModel, defaultReviewerModel, viewer, aiAvailable, onStepChange, onBack, local }: { repo: string; number: number; initialStep: number | null; defaultModel: string; defaultScoutModel: string; defaultReviewerModel: string; viewer: string; aiAvailable: boolean; onStepChange: (step: number) => void; onBack: () => void; local?: LocalReview }) {
   const [pull, setPull] = useState<PullRequestDetail | null>(null);
   const [replay, setReplay] = useState<ReplayResult | null>(null);
   const [attachment, setAttachment] = useState<RecordingAttachment | null>(null);
@@ -1181,11 +1213,13 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     let active = true;
     const load = async () => {
       try {
-        const { pull } = await api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo)}&number=${number}`);
+        const pull = local ? localPullDetail(local.session) : (await api<{ pull: PullRequestDetail }>(`/api/github/pull?repo=${encodeURIComponent(repo)}&number=${number}`)).pull;
         if (!active) return;
         setPull(pull);
         let cached: PullRequestState | null = null;
-        try {
+        // Local changes have no AI synopsis; without a recording they play file by file.
+        if (local) aiReplayRef.current = fileReplay(parseUnifiedDiff(pull.diff));
+        else try {
           const remote = await api<{ state: PullRequestState | null; revision: number }>(
             `/api/state?repo=${encodeURIComponent(repo)}&number=${number}&headSha=${encodeURIComponent(pull.headSha)}`,
           );
@@ -1201,6 +1235,9 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           }
           catch { /* Browser privacy settings must not block review work. */ }
         }
+        // Identical local changes restore the last draft, but replay only the recording this run provides.
+        const staleRecording = !!local && cached?.replay.source === "recording" && cached.replay.recordingId !== local.session.recording?.id;
+        if (cached && staleRecording) cached = { ...cached, replay: aiReplayRef.current!, step: 0 };
         if (!active) return;
         if (cached) {
           setReplay(upgradeReplay(cached.replay));
@@ -1217,18 +1254,22 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           setAiReview(cached.aiReview ?? null);
           setScoutModel(cached.scoutModel ?? cached.aiReview?.scoutModel ?? defaultScoutModel);
           setReviewerModel(cached.reviewerModel ?? cached.aiReview?.reviewerModel ?? defaultReviewerModel);
+        } else if (aiReplayRef.current?.chunks.length) {
+          setReplay(aiReplayRef.current);
         }
         if (!active) return;
         setStateReady(true);
         setLoading(false);
         try {
-          const result = await api<{ source: string | null; path: string; headSha: string; origin: "repository" | "gist" | "comment"; url?: string }>(`/api/github/recording?${new URLSearchParams({ repo, number: String(number), headSha: pull.headSha })}`);
+          const result = local
+            ? { source: local.session.recording?.source ?? null, path: local.session.recording?.name ?? "", headSha: pull.headSha, origin: "local" as const, url: undefined }
+            : await api<{ source: string | null; path: string; headSha: string; origin: "repository" | "gist" | "comment"; url?: string }>(`/api/github/recording?${new URLSearchParams({ repo, number: String(number), headSha: pull.headSha })}`);
           if (result.source !== null) {
             const recording = await parseRecording(result.source);
             if (!active) return;
             const found: RecordingAttachment = { recording, name: result.path, origin: result.origin, url: result.url, headSha: result.headSha };
             setLinkedRecording(found);
-            if (!cached || cached.replay.recordingId === recording.session.id) {
+            if (!cached || staleRecording || cached.replay.recordingId === recording.session.id) {
               setAttachment(found);
               setReplay(recordingReplay(recording, found.name));
               const restored = bootStepRef.current === null ? cached?.step ?? 0 : bootStepRef.current - 1;
@@ -1236,7 +1277,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
             }
           }
         } catch (error) {
-          if (active) setRecordingError(error instanceof Error ? error.message : "Could not load the PR recording.");
+          if (active) setRecordingError(error instanceof Error ? error.message : local ? "Could not load the agent's recording." : "Could not load the PR recording.");
         } finally { if (active) setRecordingBusy(false); }
       } catch (error) {
         if (active) setError(error instanceof Error ? error.message : "Could not load the pull request.");
@@ -1246,7 +1287,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     };
     void load();
     return () => { active = false; };
-  }, [repo, number, cacheKey, defaultScoutModel, defaultReviewerModel]);
+  }, [repo, number, cacheKey, defaultScoutModel, defaultReviewerModel, local]);
 
   const selectRecording = (value: RecordingAttachment) => {
     clearLineHash();
@@ -1286,7 +1327,19 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
       state.review = { comments, summary: reviewSummary, event: reviewEvent };
     }
     if (viewed.length) state.viewed = viewed;
+    const saveInBrowser = () => {
+      try {
+        saveInProgressReview(window.localStorage, cacheKey, {
+          ...state,
+          comments: state.review?.comments ?? [],
+          summary: state.review?.summary ?? "",
+          event: state.review?.event ?? "COMMENT",
+        });
+      } catch { /* Keep the in-memory state usable. */ }
+    };
     const timer = window.setTimeout(async () => {
+      // A local review has no GitHub account to store its draft under.
+      if (local) { saveInBrowser(); return; }
       const revision = Math.max(stateRevisionRef.current + 1, Date.now());
       stateRevisionRef.current = revision;
       try {
@@ -1297,18 +1350,11 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         });
         try { clearInProgressReview(window.localStorage, cacheKey); } catch { /* Storage may be unavailable. */ }
       } catch {
-        try {
-          saveInProgressReview(window.localStorage, cacheKey, {
-            ...state,
-            comments: state.review?.comments ?? [],
-            summary: state.review?.summary ?? "",
-            event: state.review?.event ?? "COMMENT",
-          });
-        } catch { /* Keep the in-memory state usable. */ }
+        saveInBrowser();
       }
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [aiReview, cacheKey, comments, model, number, pull, replay, repo, reviewEvent, reviewSummary, reviewerModel, scoutModel, showFullDiff, stateReady, step, viewed]);
+  }, [aiReview, cacheKey, comments, local, model, number, pull, replay, repo, reviewEvent, reviewSummary, reviewerModel, scoutModel, showFullDiff, stateReady, step, viewed]);
   useEffect(() => {
     if (!playing || !replay) return;
     if (step >= replay.chunks.length - 1) {
@@ -1494,7 +1540,8 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
     setLineThreads((items) => items.map((item) => item.id === id ? thread : item));
     void sendLineQuestion(thread);
   };
-  const lineAsk: LineAsk = {
+  // Questions go to OpenRouter, which a local review does not use.
+  const lineAsk: LineAsk | undefined = local ? undefined : {
     scope: "pr",
     threads: lineThreads,
     unavailable: aiAvailable ? null : "Connect OpenRouter to ask AI about code",
@@ -1609,12 +1656,14 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   }, [replay]);
 
   if (loading || !pull) {
-    return <main className="loading-screen"><span className="spinner large" /><strong>Loading #{number}</strong><span>{repo}</span>{error && <div className="error-banner">{error}</div>}</main>;
+    return <main className="loading-screen"><span className="spinner large" /><strong>{local ? "Loading local changes" : `Loading #${number}`}</strong><span>{repo}</span>{error && <div className="error-banner">{error}</div>}</main>;
   }
+
+  const fullDiffLabel = local ? "All changes" : "Full PR";
 
   // The narration, file tabs and diff are shared by the linear player and the
   // tree's node overlay, so both review the same way.
-  const reviewSidebar = <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} />;
+  const reviewSidebar = <ReviewSidebar repo={repo} pull={pull} files={files} comments={comments} aiReview={aiReview} aiReviewBusy={aiReviewBusy} aiReviewError={aiReviewError} scoutModel={scoutModel} reviewerModel={reviewerModel} event={reviewEvent} summary={reviewSummary} onRequestAiReview={() => void requestAiReview()} onScoutModelChange={setScoutModel} onReviewerModelChange={setReviewerModel} onAddFinding={addFinding} onAddAllFindings={addAllFindings} onGoToFinding={goToFinding} onEventChange={setReviewEvent} onSummaryChange={setReviewSummary} onUpdateComment={updateComment} onDeleteComment={deleteComment} onSubmitted={completeReview} onMerged={() => void refreshPull()} local={local?.bridge} />;
   const stepNarration = chunk && (
     <div className="step-narration">
       <div className="step-narration-top">
@@ -1632,12 +1681,12 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
             <div className="diff-scope-toggle" role="group" aria-label="Diff scope">
               <button className={!showFullDiff && treeScope === "node" ? "active" : ""} onClick={() => { setShowFullDiff(false); setTreeScope("node"); }} aria-pressed={!showFullDiff && treeScope === "node"}>This node</button>
               <button className={!showFullDiff && treeScope === "subtree" ? "active" : ""} onClick={() => { setShowFullDiff(false); setTreeScope("subtree"); }} aria-pressed={!showFullDiff && treeScope === "subtree"} disabled={!nodeChildren[step]?.length} title={nodeChildren[step]?.length ? "This node and everything it builds on" : "A leaf builds on nothing else"}>With prerequisites</button>
-              <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>Full PR</button>
+              <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>{fullDiffLabel}</button>
             </div>
           ) : (
             <div className="diff-scope-toggle" role="group" aria-label="Diff scope">
               <button className={!showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(false)} aria-pressed={!showFullDiff}>This step</button>
-              <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>Full PR</button>
+              <button className={showFullDiff ? "active" : ""} onClick={() => setShowFullDiff(true)} aria-pressed={showFullDiff}>{fullDiffLabel}</button>
             </div>
           )}
         </div>
@@ -1670,7 +1719,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   const stepDiff = (
     <div className="diff-scroll" ref={scrollRef}>
       {isRecorded && !showFullDiff ? <>
-        {!recording ? <p className="recording-review-notice">Attach the original recording to see its file changes, or select Full PR to keep reviewing.</p> : <>
+        {!recording ? <p className="recording-review-notice">Attach the original recording to see its file changes, or select {fullDiffLabel} to keep reviewing.</p> : <>
           {step === 0 && <p className="recording-review-notice">Starting snapshot · scope: {recording.session.scope.join(", ")}. Select the next step to review the first changes.</p>}
           {(recordedEvent?.omitted ?? recording.session.omitted).length > 0 && <details className="recording-review-evidence"><summary>Omitted files at this checkpoint</summary><ul>{(recordedEvent?.omitted ?? recording.session.omitted).map((entry) => <li key={entry.path}><code>{entry.path}</code> — {entry.reason}</li>)}</ul></details>}
           {recordedEvent?.command && <details className="recording-review-evidence" open><summary>Command result · {recordedEvent.command.exitCode === 0 ? "Passed" : "Failed"}{recordedEvent.command.signal ? ` (${recordedEvent.command.signal})` : ""}</summary><pre>{recordedEvent.command.argv.map((arg) => JSON.stringify(arg)).join(" ")}</pre><pre>{recordedEvent.command.output || "(no output)"}</pre>{recordedEvent.command.truncated && <p>Output truncated by the recorder.</p>}</details>}
@@ -1684,24 +1733,26 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   return (
     <main className="replay-shell">
       <header className="pr-header">
-        <button className="back-button" onClick={onBack}><ArrowLeft size={16} /> Pull requests</button>
-        <div className="pr-identity"><span className="open-dot" /><strong>{pull.title}</strong><span>#{pull.number}</span></div>
-        <div className="pr-stats"><span className="additions">+{pull.additions}</span><span className="deletions">−{pull.deletions}</span><span>{pull.changedFiles} files</span><a href={pull.url} target="_blank" rel="noreferrer">GitHub <ExternalLink size={12} /></a></div>
+        {!local && <button className="back-button" onClick={onBack}><ArrowLeft size={16} /> Pull requests</button>}
+        <div className="pr-identity"><span className="open-dot" /><strong>{pull.title}</strong><span>{local ? `${repo} · ${pull.head}` : `#${pull.number}`}</span></div>
+        <div className="pr-stats"><span className="additions">+{pull.additions}</span><span className="deletions">−{pull.deletions}</span><span>{pull.changedFiles} files</span>{local
+          ? <span title={`Snapshot of ${local.session.head.uncommitted ? "uncommitted work on " : ""}${local.session.head.commit.slice(0, 8)} against ${pull.base} at ${pull.baseSha.slice(0, 8)}`}>vs {pull.base}</span>
+          : <a href={pull.url} target="_blank" rel="noreferrer">GitHub <ExternalLink size={12} /></a>}</div>
       </header>
       <div className="replay-source-bar">
         <div className="diff-scope-toggle" role="group" aria-label="Replay source">
-          <button className={!isRecorded ? "active" : ""} aria-pressed={!isRecorded} disabled={building || recordingBusy} onClick={selectAiSynopsis}>AI synopsis</button>
+          <button className={!isRecorded ? "active" : ""} aria-pressed={!isRecorded} disabled={building || recordingBusy} onClick={selectAiSynopsis}>{local ? "Changed files" : "AI synopsis"}</button>
           <button className={isRecorded ? "active" : ""} aria-pressed={isRecorded} disabled={building || recordingBusy || !(attachment ?? linkedRecording)} onClick={() => { const value = attachment ?? linkedRecording; if (value) selectRecording(value); }}>Recording</button>
         </div>
         <button className="secondary-button compact" disabled={building || recordingBusy} onClick={() => recordingInputRef.current?.click()}><FileUp size={14} />{recordingBusy ? "Checking recording…" : "Attach recording"}</button>
-        {linkedRecording && attachment?.origin === "upload" && <button className="text-button" onClick={() => selectRecording(linkedRecording)}>Use PR recording</button>}
-        <span>{isRecorded ? replay.recordingName : linkedRecording ? "Recording found in this PR" : `Attach replay.json in a PR comment, commit ${PR_RECORDING_PATH}, or attach a file`}</span>
-        {!aiAvailable && <a href="/api/auth/openrouter">Connect OpenRouter for AI</a>}
+        {linkedRecording && attachment?.origin === "upload" && <button className="text-button" onClick={() => selectRecording(linkedRecording)}>{local ? "Use the agent's recording" : "Use PR recording"}</button>}
+        <span>{isRecorded ? replay.recordingName : linkedRecording ? (local ? "The agent provided a recording" : "Recording found in this PR") : local ? "Run the review command with --recording, or attach a file" : `Attach replay.json in a PR comment, commit ${PR_RECORDING_PATH}, or attach a file`}</span>
+        {!aiAvailable && !local && <a href="/api/auth/openrouter">Connect OpenRouter for AI</a>}
         <input ref={recordingInputRef} type="file" accept=".jsonl,.json,application/json,application/x-ndjson" hidden aria-label="Attach recording to this PR" onChange={(event) => { void importRecording(event.target.files?.[0]); event.target.value = ""; }} />
       </div>
       {recordingError && <div className="error-banner" role="alert">{recordingError}</div>}
       {isRecorded && <div className="recording-review-notice">
-        {recording ? <>Recorded checkpoints · {attachment?.origin === "comment" ? <a href={attachment.url} target="_blank" rel="noreferrer">Attached in a PR comment</a> : attachment?.origin === "gist" ? <a href={attachment.url} target="_blank" rel="noreferrer">Gist linked in this PR</a> : attachment?.origin === "repository" ? `From this PR at ${pull.headSha.slice(0, 8)}` : "Attached to this PR for this tab; reattach after refreshing"}. Matching PR lines receive inline comments; historical-line notes go into the review summary.</> : <>Reattach <strong>{replay.recordingName}</strong> to resume recorded playback. Your review is restored; the full PR diff is still available.</>}
+        {recording ? <>Recorded checkpoints · {attachment?.origin === "comment" ? <a href={attachment.url} target="_blank" rel="noreferrer">Attached in a PR comment</a> : attachment?.origin === "gist" ? <a href={attachment.url} target="_blank" rel="noreferrer">Gist linked in this PR</a> : attachment?.origin === "repository" ? `From this PR at ${pull.headSha.slice(0, 8)}` : attachment?.origin === "local" ? "Provided by the agent's review command" : `Attached to this ${local ? "review" : "PR"} for this tab; reattach after refreshing`}. Matching {local ? "snapshot" : "PR"} lines receive inline comments; historical-line notes go into the review summary.</> : <>Reattach <strong>{replay.recordingName}</strong> to resume recorded playback. Your review is restored; the full PR diff is still available.</>}
       </div>}
       {!replay ? (
         <section className="build-replay">
@@ -1806,7 +1857,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
       ) : (
         <div className="replay-grid">
           <aside className="timeline-panel">
-            <div className="timeline-title"><span>{isRecorded ? "Recorded checkpoints" : "Reconstruction"}</span><em>{replay.chunks.length} steps</em></div>
+            <div className="timeline-title"><span>{isRecorded ? "Recorded checkpoints" : local ? "Changed files" : "Reconstruction"}</span><em>{replay.chunks.length} steps</em></div>
             <ol ref={timelineRef}>
               {replay.chunks.map((item, index) => (
                 <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={index} data-step={index}>
@@ -1823,7 +1874,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                 </li>
               ))}
             </ol>
-            <div className="timeline-model"><Sparkles size={13} /><span>{isRecorded ? "Agent explanations" : "Replayed by"}<br /><strong>{replay.model}</strong></span></div>
+            <div className="timeline-model"><Sparkles size={13} /><span>{isRecorded ? "Agent explanations" : local ? "Local snapshot" : "Replayed by"}<br /><strong>{local && !isRecorded ? pull.headSha.slice(0, 8) : replay.model}</strong></span></div>
           </aside>
           <section className="code-stage">
             <header className="player-bar">
@@ -1832,7 +1883,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
               <button className="icon-button" onClick={() => go(step + 1)} disabled={step === replay.chunks.length - 1} aria-label="Next replay step" aria-keyshortcuts="Meta+ArrowRight" title="Next step (⌘→)"><ChevronRight size={16} /></button>
               <input type="range" min={0} max={Math.max(0, replay.chunks.length - 1)} value={step} onChange={(e) => go(Number(e.target.value))} aria-label="Replay position" />
               <strong>{step + 1} <span>/ {replay.chunks.length}</span></strong>
-              {!isRecorded && <button className="rebuild-button" onClick={() => { setReplay(null); setPlaying(false); }}>Rebuild</button>}
+              {!isRecorded && !local && <button className="rebuild-button" onClick={() => { setReplay(null); setPlaying(false); }}>Rebuild</button>}
             </header>
             {stepNarration}
             {stepFileTabs}
@@ -1845,7 +1896,137 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   );
 }
 
-export default function Home() {
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem("chronosphere-theme", next);
+}
+
+const LOCAL_BRIDGE_KEY = "chronosphere-local-review";
+
+/**
+ * Reads the review command's address from the link, then keeps it for this tab
+ * so the access token can leave the address bar and a reload still connects.
+ */
+function takeLocalBridge(): LocalBridge | null {
+  const storage = browserSession();
+  const fromLink = parseLocalBridge(window.location.hash);
+  if (!fromLink) return parseLocalBridge(storage?.getItem(LOCAL_BRIDGE_KEY) ?? "");
+  try {
+    storage?.setItem(LOCAL_BRIDGE_KEY, localBridgeFragment(fromLink));
+    if (storage) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  } catch { /* Without tab storage the link stays in the address bar so a reload still works. */ }
+  return fromLink;
+}
+
+function browserSession(): Storage | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether connecting will make the browser ask; null when it will not ask or cannot say. */
+async function loopbackPermission(): Promise<PermissionState | null> {
+  // A page served from this computer reaches it without asking.
+  if (["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)) return null;
+  // Chrome 145 renamed the permission; the older name remains an alias.
+  for (const name of ["loopback-network", "local-network-access"]) {
+    try {
+      return (await navigator.permissions.query({ name: name as PermissionName })).state;
+    } catch { /* This browser does not know the permission by this name. */ }
+  }
+  return null;
+}
+
+type LocalState =
+  | { status: "starting" }
+  | { status: "missing" }
+  | { status: "permission"; bridge: LocalBridge }
+  | { status: "connecting"; bridge: LocalBridge }
+  | { status: "error"; bridge: LocalBridge; message: string }
+  | { status: "ready"; review: LocalReview };
+
+const ignoreStep = () => {};
+const ignoreBack = () => {};
+
+/** Reviews changes served by `scripts/review.mjs` on this computer and sends the review back to it. */
+function LocalReviewApp() {
+  const [state, setState] = useState<LocalState>({ status: "starting" });
+  // Only the latest attempt may settle the page, when a new link replaces an old one mid-connect.
+  const attemptRef = useRef(0);
+  const connect = useCallback(async (bridge: LocalBridge) => {
+    const attempt = ++attemptRef.current;
+    setState({ status: "connecting", bridge });
+    try {
+      const { session } = await bridgeRequest<{ session: unknown }>(bridge, "/session");
+      if (!isLocalReviewSession(session)) throw new Error("The review command sent a snapshot this version of Chronosphere cannot read. Update the review script.");
+      if (attempt === attemptRef.current) setState({ status: "ready", review: { bridge, session } });
+    } catch (error) {
+      if (attempt === attemptRef.current) setState({ status: "error", bridge, message: error instanceof Error ? error.message : "Could not load the local changes." });
+    }
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const start = async () => {
+      const bridge = takeLocalBridge();
+      // Chrome wants its "apps on this device" prompt to follow a click, so ask for one first.
+      const permission = bridge ? await loopbackPermission() : null;
+      if (!active) return;
+      if (!bridge) setState({ status: "missing" });
+      else if (permission === "prompt") setState({ status: "permission", bridge });
+      else void connect(bridge);
+    };
+    void start();
+    // A new review link opened in this tab changes only the fragment, which does not reload the page.
+    const followLink = () => { if (parseLocalBridge(window.location.hash)) void start(); };
+    window.addEventListener("hashchange", followLink);
+    return () => { active = false; window.removeEventListener("hashchange", followLink); };
+  }, [connect]);
+  const bridge = state.status === "ready" ? state.review.bridge : null;
+  const readFile = useMemo<ReadFile | null>(() => bridge
+    ? async (_repo, ref, path) => (await bridgeRequest<{ content: string }>(bridge, `/file?${new URLSearchParams({ ref, path })}`)).content
+    : null, [bridge]);
+
+  return (
+    <div className="app-frame">
+      <AppHeader auth={null} context="Local review" onToggleTheme={toggleTheme} onLogout={ignoreBack} />
+      {state.status === "ready" && readFile ? (
+        <FileReaderContext.Provider value={readFile}>
+          <ReplayWorkspace key={state.review.session.id} repo={state.review.session.repository.name} number={0} initialStep={null} defaultModel="" defaultScoutModel="" defaultReviewerModel="" viewer="local" aiAvailable={false} onStepChange={ignoreStep} onBack={ignoreBack} local={state.review} />
+        </FileReaderContext.Provider>
+      ) : state.status === "missing" ? (
+        <main className="loading-screen">
+          <strong>No local review to open</strong>
+          <span className="local-note">Ask your agent to run Chronosphere&apos;s review command, then open the link it prints.</span>
+        </main>
+      ) : state.status === "permission" ? (
+        <main className="loading-screen">
+          <ShieldCheck size={26} />
+          <strong>Connect to the review on this computer</strong>
+          <span className="local-note">Your agent is serving its changes from this computer; nothing is uploaded. Your browser will ask whether this site may access apps on your device.</span>
+          <button className="primary-button" onClick={() => void connect(state.bridge)}>Connect<ArrowRight size={14} /></button>
+        </main>
+      ) : state.status === "error" ? (
+        <main className="loading-screen">
+          <strong>Could not open the local review</strong>
+          <div className="error-banner local-note"><XCircle size={15} />{state.message}</div>
+          <button className="primary-button" onClick={() => void connect(state.bridge)}><RefreshCw size={14} />Try again</button>
+        </main>
+      ) : (
+        <main className="loading-screen"><span className="spinner large" /><strong>Connecting to the review command</strong></main>
+      )}
+    </div>
+  );
+}
+
+/** `/local` reviews changes served from this computer and needs no GitHub account. */
+export default function Page() {
+  return usePathname()?.replace(/\/+$/, "") === "/local" ? <LocalReviewApp /> : <Home />;
+}
+
+function Home() {
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [route, setRoute] = useState<Route>(readRoute);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -1883,11 +2064,6 @@ export default function Home() {
   const openPull = useCallback((repo: string, pull: number) => navigate({ repo, pull, step: null }, "push"), [navigate]);
   const closePull = useCallback(() => navigate({ repo: routeRef.current.repo, pull: null, step: null }, "push"), [navigate]);
   const syncStep = useCallback((step: number) => navigate({ ...routeRef.current, step }, "replace"), [navigate]);
-  const toggleTheme = () => {
-    const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = next;
-    localStorage.setItem("chronosphere-theme", next);
-  };
   const logout = async () => {
     await api("/api/auth/logout", { method: "POST" });
     window.location.href = "/";

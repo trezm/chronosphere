@@ -25,6 +25,7 @@ PR replay can use an AI reconstruction or recorded workspace checkpoints with ex
 - Railway build, start, and health-check configuration
 - Local JSONL recorder and browser-only recording playback at `/recordings`
 - PR-associated recordings from `.chronosphere/replay.jsonl` or a manual attachment, with inline review comments and historical-step notes
+- Local review of an agent's unpushed work at `/local`, with the review returned straight to the waiting agent
 
 ## Review a recording with a PR
 
@@ -73,6 +74,20 @@ The agent groups changes into an understandable sequence. The bundled helper rea
 
 The resulting file imports through **Attach recording** or `/recordings`. The current v1 importer uses the Recording category; the replay title and opening explanation label the sequence as **reconstructed**, with generation timestamps and no invented test results or development history. The agent returns the file locally; publishing it is a separate choice. Use [`chronosphere-record`](SKILL.md) instead when you want to capture actual work as it happens.
 
+## Review local changes with an agent
+
+An agent can hand you its work for review before there is a pull request. The [`chronosphere-review` skill](skills/chronosphere-review/SKILL.md) tells it how: **"Let me review your changes in Chronosphere before you continue."** The agent runs the review command, which opens a link to Chronosphere's `/local` page and waits. You review in the usual workspace, choose Comment, Approve, or Changes, and press **Send to agent**. The command then prints your verdict, summary, and line comments, each with the code it refers to, and exits. The agent reads that output and carries on.
+
+```sh
+npm run review -- --repo /path/to/working/copy --title 'Add request validation'
+```
+
+The review covers everything from the merge base with `--base` (default `origin/HEAD`, then `main` or `master`) to the working copy, including staged, unstaged, and untracked files Git does not ignore. Ignored files and `.chronosphere/` are left out. The command writes the working copy to a Git tree object through a temporary index, so the real index and working tree are untouched. Edits made while you review do not change what you see, and line numbers in the review refer to that snapshot. The unreferenced objects are removed by Git's normal garbage collection.
+
+Pass `--recording` with a chronosphere-record session to replay the agent's checkpoints; otherwise the page steps through the changed files one at a time. AI synopsis, AI review, line questions, and merging are not available in local mode. Your draft is kept in this browser, so reloading the tab or reviewing identical changes again restores it. Use `--json` for machine-readable output, `--timeout MINUTES` to give up waiting (exit code 2), and `--no-open` to only print the link. Run `node --experimental-strip-types scripts/review.mjs --help` for every option. Agents should run that `node` command directly, since `npm run` adds its own lines to standard output.
+
+**How the page reaches your machine.** Nothing is uploaded. The command listens on `127.0.0.1` and puts the port and a random token in the link's fragment, which browsers never send to the server. The hosted page reads the snapshot from that address and posts the review back to it. The command answers only requests with the token, from the Chronosphere origin given by `--app` (or `CHRONOSPHERE_URL`, default `https://getchronosphere.com`), addressed to a loopback host name. It serves only the reviewed base and snapshot, and it stops once a review arrives. Chrome and Firefox ask once whether the site may access apps on your device; allow it. Safari blocks websites from reaching `127.0.0.1`. Use another browser, or run Chronosphere locally and pass `--app http://localhost:3000`.
+
 ## Local recording experiment
 
 Run `npm run record:demo`, then open `/recordings` and choose the printed `.jsonl` path. The demo runs a real failing test in a temporary repository, fixes the implementation, reruns the test, and creates then deletes a scratch file. The viewer preserves every checkpoint even though the scratch file is absent from the final workspace. This route needs no GitHub or OpenRouter connection.
@@ -112,7 +127,7 @@ The viewer checks content hashes, contiguous event order, unique IDs, and each p
 
 ## Publish skill updates
 
-Run `npm run skills:export -- /absolute/path/to/new-export` to create a public distribution from an explicit list of skill, helper, documentation, and test files. The destination must not exist. This exports no application code beyond the recorder and its two portable format utilities, no repository history, and no recordings or local configuration. Run `npm test` in the exported directory, validate both skills, then review and publish those files to `trezm/chronosphere-skills`. Keep the public root and per-skill MIT licenses with the distribution. Update the distribution package version under `skills/distribution` for each release, attach one ZIP per skill with SHA-256 checksums, and tag the corresponding public commit. The public repository runs the portable tests on Node 22 and 24.
+Run `npm run skills:export -- /absolute/path/to/new-export` to create a public distribution from an explicit list of skill, helper, documentation, and test files. The destination must not exist. This exports no application code beyond the recorder, the review command, and their two portable format utilities, no repository history, and no recordings or local configuration. Run `npm test` in the exported directory, validate both skills, then review and publish those files to `trezm/chronosphere-skills`. Keep the public root and per-skill MIT licenses with the distribution. Update the distribution package version under `skills/distribution` for each release, attach one ZIP per skill with SHA-256 checksums, and tag the corresponding public commit. The public repository runs the portable tests on Node 22 and 24.
 
 ## Local setup
 

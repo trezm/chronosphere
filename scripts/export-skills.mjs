@@ -28,12 +28,15 @@ function replaceRequired(source, before, after) {
 
 const recorder = "skills/chronosphere-record";
 const reconstruction = "skills/chronosphere-reconstruct";
+const review = "skills/chronosphere-review";
 for (const name of ["README.md", "LICENSE", "package.json"]) await copy(`skills/distribution/${name}`, name);
 await copy("skills/distribution/ci.yml", ".github/workflows/ci.yml");
 await emit(".gitignore", "node_modules/\n__pycache__/\n*.pyc\n.DS_Store\n.chronosphere/\n");
 for (const name of ["scripts/record.mjs", "lib/recording.ts", "lib/recording-transport.ts"]) await copy(name, `${recorder}/${name}`);
 for (const name of ["SKILL.md", "references/format.md", "scripts/reconstruct.py"]) await copy(`${reconstruction}/${name}`);
-for (const skill of [recorder, reconstruction]) await copy("skills/distribution/LICENSE", `${skill}/LICENSE`);
+for (const name of ["scripts/review.mjs", "lib/recording.ts"]) await copy(name, `${review}/${name}`);
+await copy(`${review}/SKILL.md`);
+for (const skill of [recorder, reconstruction, review]) await copy("skills/distribution/LICENSE", `${skill}/LICENSE`);
 
 let instructions = await readFile(resolve(root, "SKILL.md"), "utf8");
 instructions = replaceRequired(instructions, "beside this root-level skill", "bundled with this skill");
@@ -46,12 +49,17 @@ const details = readme.match(/\*\*Where the record lives\.\*\*[\s\S]*?(?=\n## Lo
 if (!details) throw new Error("Recording reference section was not found");
 await emit(`${recorder}/references/recording.md`, "# Recording details\n\n" + details.trim() + "\n");
 
-for (const name of ["recording.test.mjs", "recording-transport.test.mjs", "reconstruct.test.mjs"]) {
+for (const name of ["recording.test.mjs", "recording-transport.test.mjs", "reconstruct.test.mjs", "review.test.mjs"]) {
   let source = await readFile(resolve(root, "tests", name), "utf8");
   source = source.replaceAll('"../lib/recording', '"../skills/chronosphere-record/lib/recording');
   if (name === "recording.test.mjs") {
     source = replaceRequired(source, 'resolve("scripts/record.mjs")', 'resolve("skills/chronosphere-record/scripts/record.mjs")');
     source = replaceRequired(source, 'symlink(resolve("."), alias', 'symlink(resolve("skills/chronosphere-record"), alias');
+  }
+  if (name === "review.test.mjs") {
+    source = replaceRequired(source, '"../scripts/review.mjs"', '"../skills/chronosphere-review/scripts/review.mjs"');
+    source = replaceRequired(source, 'resolve("scripts/review.mjs")', 'resolve("skills/chronosphere-review/scripts/review.mjs")');
+    source = replaceRequired(source, 'resolve("scripts/record.mjs")', 'resolve("skills/chronosphere-record/scripts/record.mjs")');
   }
   await emit(`tests/${name}`, source);
 }
