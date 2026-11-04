@@ -34,8 +34,8 @@ await copy("skills/distribution/ci.yml", ".github/workflows/ci.yml");
 await emit(".gitignore", "node_modules/\n__pycache__/\n*.pyc\n.DS_Store\n.chronosphere/\n");
 for (const name of ["scripts/record.mjs", "lib/recording.ts", "lib/recording-transport.ts"]) await copy(name, `${recorder}/${name}`);
 for (const name of ["SKILL.md", "references/format.md", "scripts/reconstruct.py"]) await copy(`${reconstruction}/${name}`);
-for (const name of ["scripts/review.mjs", "lib/recording.ts"]) await copy(name, `${review}/${name}`);
-await copy(`${review}/SKILL.md`);
+for (const name of ["scripts/review.mjs", "lib/recording.ts", "lib/diff.ts", "lib/replay-tree.ts"]) await copy(name, `${review}/${name}`);
+for (const name of ["SKILL.md", "references/reconstruction.md"]) await copy(`${review}/${name}`);
 for (const skill of [recorder, reconstruction, review]) await copy("skills/distribution/LICENSE", `${skill}/LICENSE`);
 
 let instructions = await readFile(resolve(root, "SKILL.md"), "utf8");

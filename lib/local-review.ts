@@ -1,4 +1,5 @@
 import { parseUnifiedDiff } from "./diff.ts";
+import { isReplay } from "./review-cache.ts";
 import type { DiffFile, PullRequestDetail, ReplayChunk, ReplayResult } from "./types";
 
 /**
@@ -26,6 +27,8 @@ export interface LocalReviewSession {
   commits: Array<{ sha: string; subject: string }>;
   diff: string;
   recording: { id: string; name: string; source: string } | null;
+  /** The agent's own reconstruction from `--plan`; absent from commands before it existed. */
+  replay?: ReplayResult | null;
 }
 
 export function parseLocalBridge(fragment: string): LocalBridge | null {
@@ -58,7 +61,8 @@ export function isLocalReviewSession(value: unknown): value is LocalReviewSessio
     && typeof session.base?.ref === "string" && SHA.test(session.base.sha ?? "")
     && SHA.test(session.head?.sha ?? "") && SHA.test(session.head?.commit ?? "") && typeof session.head?.uncommitted === "boolean"
     && Array.isArray(session.commits)
-    && (session.recording === null || (typeof session.recording?.id === "string" && typeof session.recording.name === "string" && typeof session.recording.source === "string"));
+    && (session.recording === null || (typeof session.recording?.id === "string" && typeof session.recording.name === "string" && typeof session.recording.source === "string"))
+    && (session.replay === undefined || session.replay === null || (isReplay(session.replay) && session.replay.source === undefined));
 }
 
 /** Calls the review command. A refused connection usually means it already finished or was stopped. */

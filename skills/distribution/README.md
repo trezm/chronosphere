@@ -6,7 +6,7 @@ Create portable code replays with your agent, and review its local work in Chron
 | --- | --- | --- |
 | [chronosphere-record](skills/chronosphere-record/SKILL.md) | Capture actual edits, explanations, and command results while working | Node.js 22.13+ and Git |
 | [chronosphere-reconstruct](skills/chronosphere-reconstruct/SKILL.md) | Turn an existing pull request into an inferred implementation sequence | Python 3.9+ and PR file access; Git optional |
-| [chronosphere-review](skills/chronosphere-review/SKILL.md) | Review the agent's local changes in Chronosphere and send the review straight back to it | Node.js 22.13+, Git, and Chrome or Firefox |
+| [chronosphere-review](skills/chronosphere-review/SKILL.md) | Review the agent's local changes in Chronosphere, as recorded or reconstructed steps or a dependency tree, and send the review straight back to it | Node.js 22.13+, Git, and Chrome or Firefox |
 
 ## Install
 

@@ -69,5 +69,6 @@ export function migrateInProgressReview(review: InProgressReview): PullRequestSt
   if (review.comments.length || review.summary.trim()) {
     state.review = { comments: review.comments, summary: review.summary, event: review.event };
   }
+  if (review.viewed?.length) state.viewed = review.viewed;
   return state;
 }

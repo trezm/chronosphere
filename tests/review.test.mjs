@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { formatReview } from "../scripts/review.mjs";
+import { formatReview, planReplay } from "../scripts/review.mjs";
 
 const reviewer = resolve("scripts/review.mjs");
 const APP = "http://localhost:3000";
@@ -105,6 +105,18 @@ test("a review snapshots commits, uncommitted and untracked work without touchin
   assert.equal(review.snapshot.tree, session.head.sha);
 });
 
+test("a same-size edit made in the second after a commit is still in the snapshot", async (t) => {
+  const { repo, git } = await fixture(t);
+  await writeFile(join(repo, "app.txt"), "one\ntwo\nthree\nfour\nsix\n");
+  git("commit", "--quiet", "-am", "Six");
+  await writeFile(join(repo, "app.txt"), "one\ntwo\nthree\nfour\nSIX\n");
+  // Once the clock moves past the index's second, only its preserved timestamp makes Git recheck the file.
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1100));
+  const listed = spawnSync(process.execPath, ["--experimental-strip-types", reviewer, "--repo", repo, "--base", "main", "--list-lines"], { encoding: "utf8" });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /^\[\d+\] \+ SIX$/m);
+});
+
 test("the bridge answers only its own page, with its token, on a loopback host", async (t) => {
   const { repo } = await fixture(t);
   await writeFile(join(repo, "app.txt"), "changed\n");
@@ -187,4 +199,92 @@ test("markdown reviews quote each commented line with its context", () => {
   // The fence outgrows any backticks inside the quoted code.
   assert.match(text, /^````\n {3}8 \| before\n> {2}9 \| removed ``` fence\n {2}10 \| after\n````$/m);
   assert.match(text, /^Why remove this\?$/m);
+});
+
+const PLAN_SESSION = {
+  base: { ref: "main", sha: "a".repeat(40) },
+  head: { sha: "b".repeat(40) },
+  // Six changed lines: 1–3 in model.ts, 4–5 in service.ts, 6 in handler.ts.
+  diff: [
+    "diff --git a/model.ts b/model.ts", "new file mode 100644", "--- /dev/null", "+++ b/model.ts", "@@ -0,0 +1,3 @@", "+a", "+b", "+c",
+    "diff --git a/service.ts b/service.ts", "--- a/service.ts", "+++ b/service.ts", "@@ -1,2 +1,2 @@", " keep", "-old", "+new",
+    "diff --git a/handler.ts b/handler.ts", "--- a/handler.ts", "+++ b/handler.ts", "@@ -1,1 +1,2 @@", " keep", "+call", "",
+  ].join("\n"),
+};
+const at = { base: "a".repeat(40), snapshot: "b".repeat(40) };
+const step = (title, ...ranges) => ({ title, description: `${title}.`, ranges: ranges.map(([start, end]) => ({ start, end })) });
+
+test("a complete step plan becomes the replay the page plays", () => {
+  const replay = planReplay({ ...at, layout: "steps", steps: [{ ...step("Model", [1, 3]), impactful: true }, step("Service and handler", [4, 5], [6, 6])] }, PLAN_SESSION);
+  assert.equal(replay.layout, undefined);
+  assert.deepEqual(replay.chunks.map((chunk) => [chunk.title, chunk.impactful, chunk.ranges]), [
+    ["Model", true, [{ file: "model.ts", start: 1, end: 3 }]],
+    ["Service and handler", false, [{ file: "service.ts", start: 4, end: 5 }, { file: "handler.ts", start: 6, end: 6 }]],
+  ]);
+});
+
+test("a tree plan is stored children first with index parents", () => {
+  const replay = planReplay({ ...at, layout: "tree", nodes: [
+    { id: "handler", parent: null, ...step("Handler", [6, 6]) },
+    { id: "service", parent: "handler", ...step("Service", [4, 5]) },
+    { id: "model", parent: "service", ...step("Model", [1, 3]) },
+  ] }, PLAN_SESSION);
+  assert.equal(replay.layout, "tree");
+  assert.deepEqual(replay.chunks.map((chunk) => [chunk.title, chunk.parent]), [["Model", 1], ["Service", 2], ["Handler", null]]);
+});
+
+test("a plan is refused with every problem listed", () => {
+  assert.throws(() => planReplay({ ...at, snapshot: "c".repeat(40), layout: "steps", steps: [step("All", [1, 6])] }, PLAN_SESSION), /now at bbbbbbbb against aaaaaaaa\. Run --list-lines again/);
+  assert.throws(() => planReplay({ ...at, layout: "graph", steps: [] }, PLAN_SESSION), /"steps" or "tree"/);
+  assert.throws(() => planReplay({ ...at, layout: "steps", nodes: [step("All", [1, 6])] }, PLAN_SESSION), /non-empty "steps" list/);
+  assert.throws(() => planReplay({ ...at, layout: "steps", steps: [step("A", [1, 3]), step("B", [3, 4]), { title: "", ranges: [{ start: 0, end: 9 }] }] }, PLAN_SESSION), (error) => {
+    assert.match(error.message, /^The plan has 5 problems:/);
+    assert.match(error.message, /Step 3 needs a title\./);
+    assert.match(error.message, /Step 3 needs a description\./);
+    assert.match(error.message, /Step 3 has the range \{"start":0,"end":9\}; ranges are .* ≤ 6\./);
+    assert.match(error.message, /No step covers changed lines 5–6\./);
+    assert.match(error.message, /More than one step covers line 3\./);
+    return true;
+  });
+  assert.throws(() => planReplay({ ...at, layout: "tree", nodes: [
+    { id: "a", parent: null, ...step("A", [1, 3]) },
+    { id: "b", parent: "a", ...step("B", [4, 5]) },
+    { id: "a", parent: "missing", ...step("C", [6, 6]) },
+  ] }, PLAN_SESSION), (error) => {
+    assert.match(error.message, /Node 3 reuses the id "a"\./);
+    assert.match(error.message, /Node 3 has the parent "missing", which is not another node's id\./);
+    return true;
+  });
+  assert.throws(() => planReplay({ ...at, layout: "tree", nodes: [
+    { id: "a", parent: "b", ...step("A", [1, 3]) },
+    { id: "b", parent: "a", ...step("B", [4, 6]) },
+  ] }, PLAN_SESSION), (error) => {
+    assert.match(error.message, /The tree needs a root/);
+    assert.match(error.message, /Node 1 is in a cycle of parents\./);
+    return true;
+  });
+});
+
+test("--list-lines numbers the snapshot's changed lines and a matching plan reaches the page", async (t) => {
+  const { repo } = await fixture(t);
+  await writeFile(join(repo, "app.txt"), "one\nTWO\nthree\nfour\nfive\n");
+  await writeFile(join(repo, "new.txt"), "brand new\n");
+  const listed = spawnSync(process.execPath, ["--experimental-strip-types", reviewer, "--repo", repo, "--base", "main", "--list-lines"], { encoding: "utf8" });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /^# Changed lines for a Chronosphere review plan: 3 lines in 2 files\./);
+  const [, base, snapshot] = listed.stdout.match(/"base": "([0-9a-f]{40})", "snapshot": "([0-9a-f]{40})"/);
+  assert.match(listed.stdout, /^== app\.txt \(modified\)$/m);
+  assert.match(listed.stdout, /^\[1\] - two$/m);
+  assert.match(listed.stdout, /^\[2\] \+ TWO$/m);
+  assert.match(listed.stdout, /^\[3\] \+ brand new$/m);
+  const plan = join(repo, "ignored.txt");
+  await writeFile(plan, JSON.stringify({ base, snapshot, layout: "tree", nodes: [
+    { id: "app", parent: null, ...step("Shout two", [1, 2]) },
+    { id: "new", parent: "app", ...step("Add a file", [3, 3]) },
+  ] }));
+  const { call } = await connect(t, repo, "--plan", plan);
+  const { session } = await (await call("/session")).json();
+  assert.equal(session.head.sha, snapshot);
+  assert.equal(session.replay.layout, "tree");
+  assert.deepEqual(session.replay.chunks.map((chunk) => [chunk.title, chunk.parent]), [["Add a file", 1], ["Shout two", null]]);
 });

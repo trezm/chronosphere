@@ -48,6 +48,15 @@ test("round-trips an in-progress review in browser storage", () => {
   assert.equal(storage.length, 0);
 });
 
+test("keeps the tree nodes a reviewer marked as viewed in browser storage", () => {
+  const storage = memoryStorage();
+  const key = reviewCacheKey("local", "owner/repo", 0);
+  saveInProgressReview(storage, key, { ...review, viewed: [0, 2] });
+  assert.deepEqual(loadInProgressReview(storage, key, "abc123")?.viewed, [0, 2]);
+  assert.equal(isInProgressReview({ ...review, viewed: [-1] }), false);
+  assert.equal(isInProgressReview({ ...review, viewed: "0" }), false);
+});
+
 test("invalidates a cached review when the pull request head changes", () => {
   const storage = memoryStorage();
   const key = reviewCacheKey("Pete", "Acme/Widget", 42);

@@ -55,6 +55,15 @@ test("sessions from the review command are recognised and malformed ones are not
   assert.equal(isLocalReviewSession(session({ version: 2 })), false);
   assert.equal(isLocalReviewSession(session({ head: { sha: "not-a-sha", commit: "c".repeat(40), uncommitted: false } })), false);
   assert.equal(isLocalReviewSession(session({ diff: undefined })), false);
+  // Commands from before --plan send no replay at all.
+  assert.equal(isLocalReviewSession(session({ replay: undefined })), true);
+  const tree = { model: "Your agent", truncated: false, layout: "tree", chunks: [
+    { title: "Leaf", description: "", ranges: [{ file: "notes.md", start: 3, end: 4 }], parent: 1 },
+    { title: "Root", description: "", ranges: [{ file: "lib/a.ts", start: 1, end: 2 }], parent: null },
+  ] };
+  assert.equal(isLocalReviewSession(session({ replay: tree })), true);
+  assert.equal(isLocalReviewSession(session({ replay: { ...tree, chunks: [{ ...tree.chunks[0], parent: 0 }, tree.chunks[1]] } })), false);
+  assert.equal(isLocalReviewSession(session({ replay: { ...tree, layout: undefined, source: "recording", recordingId: "r", recordingName: "r" } })), false);
 });
 
 test("a local snapshot fills the pull request shape the workspace renders", () => {

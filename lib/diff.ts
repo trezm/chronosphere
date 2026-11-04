@@ -120,6 +120,40 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
   return files.filter((candidate) => candidate.hunks.length > 0);
 }
 
+/**
+ * The diff as a replay author sees it: every changed line carries the number
+ * a step's ranges refer to, context lines are indented, and each file is headed
+ * by its path and status. Output past `maxChars` is cut at a line boundary.
+ */
+export function numberedChanges(files: DiffFile[], maxChars = Infinity): { text: string; truncated: boolean } {
+  let output = "";
+  let truncated = false;
+  for (const file of files) {
+    const header = `\n== ${file.path} (${file.status})\n`;
+    if (output.length + header.length > maxChars) {
+      truncated = true;
+      break;
+    }
+    output += header;
+    for (const hunk of file.hunks) {
+      const lines = [hunk.header, ...hunk.lines.map((line) => {
+        if (line.type === "context") return `       ${line.text}`;
+        return `[${line.changedIndex}] ${line.type === "add" ? "+" : "-"} ${line.text}`;
+      })];
+      for (const line of lines) {
+        if (output.length + line.length + 1 > maxChars) {
+          truncated = true;
+          break;
+        }
+        output += `${line}\n`;
+      }
+      if (truncated) break;
+    }
+    if (truncated) break;
+  }
+  return { text: output.trim(), truncated };
+}
+
 export function changedLines(files: DiffFile[]): Array<{ file: DiffFile; line: DiffLine }> {
   return files.flatMap((file) =>
     file.hunks.flatMap((hunk) =>
