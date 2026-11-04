@@ -16,12 +16,14 @@ import {
   GitBranch,
   GitMerge,
   GitPullRequest,
+  History,
   ListOrdered,
   Lock,
   LogOut,
   MessageSquare,
   Moon,
   Network,
+  Package,
   Pause,
   Pencil,
   Play,
@@ -30,6 +32,7 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  SquareTerminal,
   Star,
   Sun,
   Trash2,
@@ -149,6 +152,8 @@ function Avatar({ src, alt, size = 24 }: { src: string; alt: string; size?: numb
   return <Image className="avatar" src={src} alt={alt} width={size} height={size} unoptimized />;
 }
 
+const SKILLS_REPO_URL = "https://github.com/trezm/chronosphere-skills";
+
 function Brand() {
   return (
     <div className="brand">
@@ -176,7 +181,7 @@ function AppHeader({
     <header className="app-header">
       <Brand />
       <div className="header-right">
-        <a className="recording-home" href="https://github.com/trezm/chronosphere-skills" target="_blank" rel="noreferrer">Agent skills <ExternalLink size={12} /></a>
+        <a className="recording-home" href={SKILLS_REPO_URL} target="_blank" rel="noreferrer">Agent skills <ExternalLink size={12} /></a>
         <Link className="recording-home" href="/recordings">Open recording</Link>
         <span className="header-context">{context}</span>
         <button className="icon-button quiet theme-toggle" onClick={onToggleTheme} aria-label="Toggle color mode" title="Toggle color mode">
@@ -196,6 +201,45 @@ function AppHeader({
   );
 }
 
+const LANDING_FEATURES: Array<{ key: string; icon: React.ReactNode; title: string; body: React.ReactNode }> = [
+  {
+    key: "replay",
+    icon: <ListOrdered size={17} />,
+    title: "Replay a pull request in steps",
+    body: "A model splits the diff into a sequence of smaller changes, each with a short explanation, so a large PR can be read in the order it was likely built. The full diff is one click away.",
+  },
+  {
+    key: "recording",
+    icon: <History size={17} />,
+    title: "Replay what an agent actually did",
+    body: "With the chronosphere-record skill, a coding agent saves checkpoints as it works, along with its reasoning and the commands it ran. Attach the recording to the PR to review those steps instead of a reconstruction.",
+  },
+  {
+    key: "github",
+    icon: <GitPullRequest size={17} />,
+    title: "Review and merge on GitHub",
+    body: "Comment on lines at any step and submit them as one GitHub review that comments, approves, or requests changes. Drafts are saved as you go. Merge, squash, or rebase from the same page, tied to the commit you reviewed.",
+  },
+  {
+    key: "ai-review",
+    icon: <Sparkles size={17} />,
+    title: "AI review and line questions",
+    body: "An optional AI review points out likely problems, and you pick which findings to add to your review as editable comments. You can also ask a question about any line in the diff.",
+  },
+  {
+    key: "local",
+    icon: <SquareTerminal size={17} />,
+    title: "Review local changes before a PR",
+    body: "The chronosphere-review skill opens an agent's uncommitted work in the same review page, as its recorded checkpoints or as steps the agent groups the changes into. When you send your review, the agent gets your verdict and line comments directly. Nothing is uploaded.",
+  },
+  {
+    key: "skills",
+    icon: <Package size={17} />,
+    title: "Agent skills",
+    body: <>The record, reconstruct, and review skills work with agents that support skills. Reconstruct builds a replay of an existing PR with the agent&apos;s own model. Install them with:<code className="feature-command">npx skills add trezm/chronosphere-skills</code></>,
+  },
+];
+
 function ConnectionGate({ auth, connectionError }: { auth: AuthState; connectionError?: string | null }) {
   const queryError = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("error") : null;
   const error = connectionError ?? queryError;
@@ -212,7 +256,7 @@ function ConnectionGate({ auth, connectionError }: { auth: AuthState; connection
     {
       key: "openrouter",
       title: "Connect OpenRouter",
-      copy: "Use your account to reconstruct each pull request into a replayable story.",
+      copy: "Optional. Use your account for AI replays, AI review, and line questions.",
       connected: auth.openrouter.connected,
       icon: <Sparkles size={20} />,
       href: "/api/auth/openrouter",
@@ -221,37 +265,56 @@ function ConnectionGate({ auth, connectionError }: { auth: AuthState; connection
   ];
   return (
     <main className="auth-shell">
-      <div className="auth-orbit" aria-hidden="true"><span /><span /><span /></div>
-      <section className="auth-card">
-        <div className="eyebrow"><CircleDot size={13} /> A code review time machine</div>
-        <h1>See the pull request<br />before it was finished.</h1>
-        <p className="auth-lede">
-          Chronosphere asks a model to reconstruct a plausible build order, then lets you review the code as it lands—one coherent step at a time.
-        </p>
-        {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
-        <div className="connection-list">
-          {steps.map((step, index) => (
-            <div className={`connection-row ${step.connected ? "is-connected" : ""}`} key={step.key}>
-              <div className="connection-index">0{index + 1}</div>
-              <div className="connection-icon">{step.icon}</div>
-              <div className="connection-copy">
-                <strong>{step.title}</strong>
-                <span>{step.copy}</span>
+      <div className="auth-hero">
+        <div className="auth-orbit" aria-hidden="true"><span /><span /><span /></div>
+        <section className="auth-card">
+          <div className="eyebrow"><CircleDot size={13} /> A code review time machine</div>
+          <h1>See the pull request<br />before it was finished.</h1>
+          <p className="auth-lede">
+            Chronosphere shows a pull request as a sequence of smaller steps, either reconstructed by a model or recorded by the agent that wrote it, so you can review the code one coherent piece at a time.
+          </p>
+          {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
+          <div className="connection-list">
+            {steps.map((step, index) => (
+              <div className={`connection-row ${step.connected ? "is-connected" : ""}`} key={step.key}>
+                <div className="connection-index">0{index + 1}</div>
+                <div className="connection-icon">{step.icon}</div>
+                <div className="connection-copy">
+                  <strong>{step.title}</strong>
+                  <span>{step.copy}</span>
+                </div>
+                {step.connected ? (
+                  <div className="connected-label"><Check size={14} /> Connected</div>
+                ) : (
+                  <a className={`primary-button compact ${step.disabled ? "disabled" : ""}`} href={step.disabled ? undefined : step.href} aria-disabled={step.disabled}>
+                    {step.disabled ? "Needs setup" : "Connect"}<ArrowRight size={14} />
+                  </a>
+                )}
               </div>
-              {step.connected ? (
-                <div className="connected-label"><Check size={14} /> Connected</div>
-              ) : (
-                <a className={`primary-button compact ${step.disabled ? "disabled" : ""}`} href={step.disabled ? undefined : step.href} aria-disabled={step.disabled}>
-                  {step.disabled ? "Needs setup" : "Connect"}<ArrowRight size={14} />
-                </a>
-              )}
-            </div>
+            ))}
+          </div>
+          {!auth.configured.github && (
+            <p className="setup-note">Add the GitHub OAuth credentials from <code>.env.example</code>, then restart the app.</p>
+          )}
+          <div className="security-note"><ShieldCheck size={15} /><span>Tokens are encrypted, HTTP-only, and never exposed to the browser.</span></div>
+        </section>
+      </div>
+      <section className="landing-features" aria-labelledby="landing-features-heading">
+        <h2 id="landing-features-heading">What Chronosphere does</h2>
+        <div className="feature-grid">
+          {LANDING_FEATURES.map((feature) => (
+            <article className="feature-item" key={feature.key}>
+              <div className="feature-icon">{feature.icon}</div>
+              <h3>{feature.title}</h3>
+              <p>{feature.body}</p>
+            </article>
           ))}
         </div>
-        {!auth.configured.github && (
-          <p className="setup-note">Add the GitHub OAuth credentials from <code>.env.example</code>, then restart the app.</p>
-        )}
-        <div className="security-note"><ShieldCheck size={15} /><span>Tokens are encrypted, HTTP-only, and never exposed to the browser.</span></div>
+        <p className="landing-note">
+          GitHub is required to open pull requests; OpenRouter is only used for the AI features.
+          To look at a recording file without signing in, use the <Link href="/recordings">recording viewer</Link>.
+          The skills and their docs are at <a href={SKILLS_REPO_URL} target="_blank" rel="noreferrer">trezm/chronosphere-skills</a>.
+        </p>
       </section>
     </main>
   );

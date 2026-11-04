@@ -214,7 +214,9 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
    Connection gate
    ========================================================================== */
 
-.auth-shell { flex: 1; display: grid; place-items: center; position: relative; overflow: hidden; overflow-y: auto; padding: 56px 24px; }
+.auth-shell { flex: 1; position: relative; overflow-x: hidden; overflow-y: auto; padding: 0 24px 64px; }
+/* The hero's padding leaves room for the 730px orbit drawn around the card. */
+.auth-hero { position: relative; display: grid; place-items: center; padding: 104px 0 56px; }
 .auth-orbit { width: 730px; height: 730px; border: 1px solid var(--border); border-radius: 50%; position: absolute; pointer-events: none; }
 .auth-orbit::before, .auth-orbit::after { content: ""; position: absolute; border: 1px solid var(--border); border-radius: 50%; inset: 85px; }
 .auth-orbit::after { inset: 205px; border-color: var(--border-strong); }
@@ -237,6 +239,18 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
 .security-note { margin-top: 24px; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--muted); font-size: 11px; }
 .setup-note { margin: 14px 0 0; font-size: 12px; color: var(--amber); }
 .setup-note code { background: var(--amber-soft); padding: 2px 4px; border-radius: 4px; }
+
+/* Feature overview below the connection card */
+.landing-features { position: relative; width: min(1040px, 100%); margin: 40px auto 0; }
+.landing-features h2 { margin: 0 0 16px; font-size: 18px; font-weight: 620; letter-spacing: -0.02em; }
+.feature-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.feature-item { padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.feature-icon { width: 32px; height: 32px; display: grid; place-items: center; background: var(--surface-3); border-radius: var(--radius-md); }
+.feature-item h3 { margin: 14px 0 6px; font-size: 14px; font-weight: 620; }
+.feature-item p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.feature-command { display: block; margin-top: 10px; padding: 7px 10px; overflow-x: auto; white-space: nowrap; color: var(--ink); font-size: 12px; background: var(--surface-3); border-radius: var(--radius-sm); }
+.landing-note { margin: 20px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; text-align: center; }
+.landing-note a { color: var(--accent); }
 
 /* ============================================================================
    Repository & pull request picker
@@ -728,12 +742,16 @@ html[data-theme="dark"] .theme-toggle .moon-icon { display: none; }
   .replay-grid { grid-template-columns: 216px minmax(460px, 1fr); }
   .review-sidebar { position: fixed; top: 108px; right: 0; bottom: 0; width: 320px; z-index: 30; box-shadow: var(--shadow-md); }
   .picker-grid { grid-template-columns: 265px 1fr; }
+  .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
   .app-header { padding: 0 14px; }
   .header-context { display: none; }
   .viewer-pill > span { display: none; }
+  .auth-shell { padding: 0 14px 48px; }
+  .auth-hero { padding: 40px 0 24px; }
   .auth-card { padding: 32px 24px 28px; }
+  .feature-grid { grid-template-columns: 1fr; }
   .connection-row { grid-template-columns: 28px 40px 1fr; }
   .connection-row .primary-button, .connected-label { grid-column: 3; justify-self: start; }
   .connection-copy span { display: none; }
