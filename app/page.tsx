@@ -152,6 +152,7 @@ function Avatar({ src, alt, size = 24 }: { src: string; alt: string; size?: numb
   return <Image className="avatar" src={src} alt={alt} width={size} height={size} unoptimized />;
 }
 
+const REPO_URL = "https://github.com/trezm/chronosphere";
 const SKILLS_REPO_URL = "https://github.com/trezm/chronosphere-skills";
 
 function Brand() {
@@ -181,8 +182,11 @@ function AppHeader({
     <header className="app-header">
       <Brand />
       <div className="header-right">
-        <a className="recording-home" href={SKILLS_REPO_URL} target="_blank" rel="noreferrer">Agent skills <ExternalLink size={12} /></a>
-        <Link className="recording-home" href="/recordings">Open recording</Link>
+        <nav className="header-links" aria-label="Chronosphere links">
+          <a className="recording-home" href={REPO_URL} target="_blank" rel="noreferrer">GitHub <ExternalLink size={12} /></a>
+          <a className="recording-home" href={SKILLS_REPO_URL} target="_blank" rel="noreferrer">Agent skills <ExternalLink size={12} /></a>
+          <Link className="recording-home" href="/recordings">Open recording</Link>
+        </nav>
         <span className="header-context">{context}</span>
         <button className="icon-button quiet theme-toggle" onClick={onToggleTheme} aria-label="Toggle color mode" title="Toggle color mode">
           <Moon className="moon-icon" size={15} /><Sun className="sun-icon" size={15} />
