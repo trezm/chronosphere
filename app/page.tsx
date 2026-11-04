@@ -1217,8 +1217,8 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
         if (!active) return;
         setPull(pull);
         let cached: PullRequestState | null = null;
-        // Local changes have no AI synopsis; without a recording they play file by file.
-        if (local) aiReplayRef.current = fileReplay(parseUnifiedDiff(pull.diff));
+        // The agent's reconstruction stands in for the AI synopsis; without one, changes play file by file.
+        if (local) aiReplayRef.current = local.session.replay ? upgradeReplay(local.session.replay) : fileReplay(parseUnifiedDiff(pull.diff));
         else try {
           const remote = await api<{ state: PullRequestState | null; revision: number }>(
             `/api/state?repo=${encodeURIComponent(repo)}&number=${number}&headSha=${encodeURIComponent(pull.headSha)}`,
@@ -1235,9 +1235,11 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
           }
           catch { /* Browser privacy settings must not block review work. */ }
         }
-        // Identical local changes restore the last draft, but replay only the recording this run provides.
-        const staleRecording = !!local && cached?.replay.source === "recording" && cached.replay.recordingId !== local.session.recording?.id;
-        if (cached && staleRecording) cached = { ...cached, replay: aiReplayRef.current!, step: 0 };
+        // Identical local changes restore the last draft, but replay only what this run provides.
+        const keepsReplay = !local || !cached || (cached.replay.source === "recording"
+          ? cached.replay.recordingId === local.session.recording?.id
+          : JSON.stringify(cached.replay) === JSON.stringify(aiReplayRef.current));
+        if (cached && !keepsReplay) cached = { ...cached, replay: aiReplayRef.current!, step: 0, viewed: undefined };
         if (!active) return;
         if (cached) {
           setReplay(upgradeReplay(cached.replay));
@@ -1269,7 +1271,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
             if (!active) return;
             const found: RecordingAttachment = { recording, name: result.path, origin: result.origin, url: result.url, headSha: result.headSha };
             setLinkedRecording(found);
-            if (!cached || staleRecording || cached.replay.recordingId === recording.session.id) {
+            if (!cached || !keepsReplay || cached.replay.recordingId === recording.session.id) {
               setAttachment(found);
               setReplay(recordingReplay(recording, found.name));
               const restored = bootStepRef.current === null ? cached?.step ?? 0 : bootStepRef.current - 1;
@@ -1660,6 +1662,11 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
   }
 
   const fullDiffLabel = local ? "All changes" : "Full PR";
+  const agentReplay = local?.session.replay ?? null;
+  // Who put the steps in this order, under the timeline.
+  const [creditLabel, creditName] = isRecorded ? ["Agent explanations", replay.model]
+    : !local ? ["Replayed by", replay?.model ?? ""]
+      : agentReplay ? ["Reconstructed by", "your agent"] : ["Local snapshot", pull.headSha.slice(0, 8)];
 
   // The narration, file tabs and diff are shared by the linear player and the
   // tree's node overlay, so both review the same way.
@@ -1741,12 +1748,12 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
       </header>
       <div className="replay-source-bar">
         <div className="diff-scope-toggle" role="group" aria-label="Replay source">
-          <button className={!isRecorded ? "active" : ""} aria-pressed={!isRecorded} disabled={building || recordingBusy} onClick={selectAiSynopsis}>{local ? "Changed files" : "AI synopsis"}</button>
+          <button className={!isRecorded ? "active" : ""} aria-pressed={!isRecorded} disabled={building || recordingBusy} onClick={selectAiSynopsis}>{!local ? "AI synopsis" : !agentReplay ? "Changed files" : isTreeReplay(agentReplay) ? "Agent's tree" : "Agent's steps"}</button>
           <button className={isRecorded ? "active" : ""} aria-pressed={isRecorded} disabled={building || recordingBusy || !(attachment ?? linkedRecording)} onClick={() => { const value = attachment ?? linkedRecording; if (value) selectRecording(value); }}>Recording</button>
         </div>
         <button className="secondary-button compact" disabled={building || recordingBusy} onClick={() => recordingInputRef.current?.click()}><FileUp size={14} />{recordingBusy ? "Checking recording…" : "Attach recording"}</button>
         {linkedRecording && attachment?.origin === "upload" && <button className="text-button" onClick={() => selectRecording(linkedRecording)}>{local ? "Use the agent's recording" : "Use PR recording"}</button>}
-        <span>{isRecorded ? replay.recordingName : linkedRecording ? (local ? "The agent provided a recording" : "Recording found in this PR") : local ? "Run the review command with --recording, or attach a file" : `Attach replay.json in a PR comment, commit ${PR_RECORDING_PATH}, or attach a file`}</span>
+        <span>{isRecorded ? replay.recordingName : linkedRecording ? (local ? "The agent provided a recording" : "Recording found in this PR") : local ? (agentReplay ? "The agent reconstructed these steps from the changes; they explain the work, not the order it happened" : "Run the review command with --recording, or attach a file") : `Attach replay.json in a PR comment, commit ${PR_RECORDING_PATH}, or attach a file`}</span>
         {!aiAvailable && !local && <a href="/api/auth/openrouter">Connect OpenRouter for AI</a>}
         <input ref={recordingInputRef} type="file" accept=".jsonl,.json,application/json,application/x-ndjson" hidden aria-label="Attach recording to this PR" onChange={(event) => { void importRecording(event.target.files?.[0]); event.target.value = ""; }} />
       </div>
@@ -1811,7 +1818,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                 );
               })}
             </ol>
-            <div className="timeline-model"><Sparkles size={13} /><span>Replayed by<br /><strong>{replay.model}</strong></span></div>
+            <div className="timeline-model"><Sparkles size={13} /><span>{creditLabel}<br /><strong>{creditName}</strong></span></div>
           </aside>
           <section className="code-stage tree-stage">
             <header className="player-bar tree-bar">
@@ -1822,7 +1829,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                 {viewed.length} of {replay.chunks.length} viewed
               </span>
               <span className="tree-hint">Each card relies on the cards beneath it. Start at the leaves and work up.</span>
-              <button className="rebuild-button" onClick={() => { setReplay(null); setNodeOpen(false); }}>Rebuild</button>
+              {!local && <button className="rebuild-button" onClick={() => { setReplay(null); setNodeOpen(false); }}>Rebuild</button>}
             </header>
             <DependencyTree chunks={replay.chunks} selected={step} comments={comments} viewed={viewedSet} onOpen={(index) => go(index)} />
             {nodeOpen && chunk && <>
@@ -1857,7 +1864,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
       ) : (
         <div className="replay-grid">
           <aside className="timeline-panel">
-            <div className="timeline-title"><span>{isRecorded ? "Recorded checkpoints" : local ? "Changed files" : "Reconstruction"}</span><em>{replay.chunks.length} steps</em></div>
+            <div className="timeline-title"><span>{isRecorded ? "Recorded checkpoints" : !local ? "Reconstruction" : agentReplay ? "Agent's steps" : "Changed files"}</span><em>{replay.chunks.length} steps</em></div>
             <ol ref={timelineRef}>
               {replay.chunks.map((item, index) => (
                 <li className={`${index === step ? "active" : index < step ? "past" : ""}${item.impactful ? " impactful" : ""}`} key={index} data-step={index}>
@@ -1874,7 +1881,7 @@ function ReplayWorkspace({ repo, number, initialStep, defaultModel, defaultScout
                 </li>
               ))}
             </ol>
-            <div className="timeline-model"><Sparkles size={13} /><span>{isRecorded ? "Agent explanations" : local ? "Local snapshot" : "Replayed by"}<br /><strong>{local && !isRecorded ? pull.headSha.slice(0, 8) : replay.model}</strong></span></div>
+            <div className="timeline-model"><Sparkles size={13} /><span>{creditLabel}<br /><strong>{creditName}</strong></span></div>
           </aside>
           <section className="code-stage">
             <header className="player-bar">

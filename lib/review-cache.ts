@@ -15,6 +15,8 @@ export interface InProgressReview {
   aiReview?: AiReviewResult;
   scoutModel?: string;
   reviewerModel?: string;
+  /** Tree replays: the steps the reviewer has marked as viewed. */
+  viewed?: number[];
 }
 
 type StoredReview = InProgressReview & {
@@ -143,7 +145,8 @@ export function isInProgressReview(value: unknown): value is InProgressReview {
     && typeof review.showFullDiff === "boolean"
     && (review.aiReview === undefined || isAiReview(review.aiReview))
     && (review.scoutModel === undefined || typeof review.scoutModel === "string")
-    && (review.reviewerModel === undefined || typeof review.reviewerModel === "string");
+    && (review.reviewerModel === undefined || typeof review.reviewerModel === "string")
+    && (review.viewed === undefined || (Array.isArray(review.viewed) && review.viewed.every((index) => Number.isInteger(index) && index >= 0)));
 }
 
 function isStoredReview(value: unknown): value is StoredReview {
@@ -177,6 +180,7 @@ export function loadInProgressReview(storage: Storage, key: string, headSha: str
     if (stored.aiReview) review.aiReview = stored.aiReview;
     if (stored.scoutModel) review.scoutModel = stored.scoutModel;
     if (stored.reviewerModel) review.reviewerModel = stored.reviewerModel;
+    if (stored.viewed?.length) review.viewed = stored.viewed;
     return review;
   } catch {
     storage.removeItem(key);

@@ -2,11 +2,13 @@
 import { createServer } from "node:http";
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { copyFile, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { cp, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseRecording, RECORDING_MAX_BYTES } from "../lib/recording.ts";
+import { changedLines, normalizeReplayChunks, numberedChanges, parseUnifiedDiff } from "../lib/diff.ts";
+import { normalizeReplayTree } from "../lib/replay-tree.ts";
 
 const DEFAULT_APP = "https://getchronosphere.com";
 const MAX_DIFF_BYTES = 20 * 1024 * 1024;
@@ -16,7 +18,8 @@ const EXCERPT_RADIUS = 2;
 
 const HELP = `Chronosphere local review (Node 22.13+; use --experimental-strip-types)
   review.mjs [--repo PATH] [--base REF] [--title TEXT] [--recording FILE]
-             [--app URL] [--port N] [--timeout MINUTES] [--json] [--no-open]
+             [--plan FILE] [--app URL] [--port N] [--timeout MINUTES] [--json] [--no-open]
+  review.mjs --list-lines [--repo PATH] [--base REF]
 
 Snapshots the working copy (commits, staged, unstaged, and untracked files Git
 does not ignore) against its merge base with --base (default: origin/HEAD, then
@@ -24,6 +27,8 @@ main or master). It serves the snapshot from 127.0.0.1, opens the review link,
 and waits. When the review is submitted it prints the verdict, summary, and
 comments on stdout and exits 0. Progress and the link go to stderr.
 --recording attaches a chronosphere-record session as the replay.
+--list-lines prints the changes with every changed line numbered, for writing
+a --plan: the agent's own reconstruction as ordered steps or a dependency tree.
 Exit 2: --timeout passed with no review. Exit 130: interrupted.
 Nothing is uploaded: the Chronosphere page reads the snapshot from this process.
 `;
@@ -39,7 +44,8 @@ function args(argv) {
     if (flag === "--help" || flag === "-h") { options.help = true; continue; }
     if (flag === "--no-open") { options.open = false; continue; }
     if (flag === "--json") { options.json = true; continue; }
-    if (!["--repo", "--base", "--title", "--recording", "--app", "--port", "--timeout"].includes(flag) || !argv.length) throw new Error(`Unknown or incomplete option: ${flag}`);
+    if (flag === "--list-lines") { options.listLines = true; continue; }
+    if (!["--repo", "--base", "--title", "--recording", "--plan", "--app", "--port", "--timeout"].includes(flag) || !argv.length) throw new Error(`Unknown or incomplete option: ${flag}`);
     options[flag.slice(2)] = argv.shift();
   }
   return options;
@@ -69,7 +75,9 @@ async function snapshotTree(repo) {
   try {
     const env = { GIT_INDEX_FILE: join(directory, "index") };
     // Starting from a copy of the real index keeps its stat cache, so unchanged files are not rehashed.
-    try { await copyFile(resolve(repo, gitLine(repo, "rev-parse", "--git-path", "index")), env.GIT_INDEX_FILE); }
+    // The copy keeps the index's timestamp too: Git rehashes files changed in the same second the index
+    // was written, and a fresh timestamp would make it trust their stale size and time instead.
+    try { await cp(resolve(repo, gitLine(repo, "rev-parse", "--git-path", "index")), env.GIT_INDEX_FILE, { preserveTimestamps: true }); }
     catch { git(repo, ["read-tree", "HEAD"], { env }); }
     git(repo, ["add", "--all", "--", "."], { env });
     return git(repo, ["write-tree"], { env }).trim();
@@ -126,8 +134,92 @@ async function snapshot(options) {
       head: { sha: tree, commit, uncommitted },
       commits, diff,
       recording: options.recording ? await readRecording(options.recording) : null,
+      replay: null,
     },
   };
+}
+
+/** Collapses sorted line numbers into "3, 7–9" form for error messages. */
+function lineList(numbers) {
+  const runs = [];
+  for (const number of numbers) {
+    const last = runs.at(-1);
+    if (last && number === last[1] + 1) last[1] = number;
+    else runs.push([number, number]);
+  }
+  const text = runs.slice(0, 12).map(([start, end]) => start === end ? `${start}` : `${start}–${end}`).join(", ");
+  return runs.length > 12 ? `${text}, …` : text;
+}
+
+/**
+ * Checks an agent's plan against the snapshot it numbered and turns it into
+ * the replay the page plays. The model-built replay quietly repairs gaps; an
+ * agent can fix its plan, so every problem is reported instead.
+ */
+export function planReplay(plan, session) {
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)) throw new Error("The plan must be a JSON object.");
+  if (plan.base !== session.base.sha || plan.snapshot !== session.head.sha) {
+    throw new Error(`The plan numbers the changes at snapshot ${String(plan.snapshot).slice(0, 8)} against ${String(plan.base).slice(0, 8)}, but they are now at ${session.head.sha.slice(0, 8)} against ${session.base.sha.slice(0, 8)}. Run --list-lines again and renumber the plan.`);
+  }
+  const tree = plan.layout === "tree";
+  if (!tree && plan.layout !== "steps") throw new Error('The plan\'s "layout" must be "steps" or "tree".');
+  const key = tree ? "nodes" : "steps";
+  const raw = plan[key];
+  if (!Array.isArray(raw) || !raw.length) throw new Error(`The plan needs a non-empty "${key}" list.`);
+  const files = parseUnifiedDiff(session.diff);
+  const total = changedLines(files).length;
+  const owner = new Array(total + 1).fill(-1);
+  const overlaps = new Set();
+  const problems = [];
+  raw.forEach((step, index) => {
+    const label = `${tree ? "Node" : "Step"} ${index + 1}`;
+    if (!step || typeof step !== "object") { problems.push(`${label} is not an object.`); return; }
+    if (typeof step.title !== "string" || !step.title.trim()) problems.push(`${label} needs a title.`);
+    if (typeof step.description !== "string" || !step.description.trim()) problems.push(`${label} needs a description.`);
+    if (!Array.isArray(step.ranges) || !step.ranges.length) { problems.push(`${label} needs at least one range.`); return; }
+    for (const range of step.ranges) {
+      const { start, end } = range ?? {};
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end > total) {
+        problems.push(`${label} has the range ${JSON.stringify(range)}; ranges are {"start": n, "end": m} with 1 ≤ n ≤ m ≤ ${total}.`);
+        continue;
+      }
+      for (let line = start; line <= end; line++) {
+        if (owner[line] === -1) owner[line] = index;
+        else if (owner[line] !== index) overlaps.add(line);
+      }
+    }
+  });
+  const missing = [];
+  for (let line = 1; line <= total; line++) if (owner[line] === -1) missing.push(line);
+  if (missing.length) problems.push(`No ${tree ? "node" : "step"} covers changed line${missing.length === 1 ? "" : "s"} ${lineList(missing)}.`);
+  if (overlaps.size) problems.push(`More than one ${tree ? "node" : "step"} covers line${overlaps.size === 1 ? "" : "s"} ${lineList([...overlaps].sort((a, b) => a - b))}.`);
+  if (tree) {
+    const ids = raw.map((node) => node && typeof node === "object" && (typeof node.id === "string" || typeof node.id === "number") ? String(node.id) : null);
+    const index = new Map();
+    ids.forEach((id, at) => {
+      if (!id) problems.push(`Node ${at + 1} needs an "id".`);
+      else if (index.has(id)) problems.push(`Node ${at + 1} reuses the id "${id}".`);
+      else index.set(id, at);
+    });
+    const parents = raw.map((node, at) => {
+      const parent = node?.parent;
+      if (parent === null || parent === undefined) return null;
+      const found = index.get(String(parent));
+      if (found === undefined || found === at) { problems.push(`Node ${at + 1} has the parent "${parent}", which is not another node's id.`); return null; }
+      return found;
+    });
+    if (!parents.includes(null)) problems.push('The tree needs a root: a node whose "parent" is null.');
+    parents.forEach((_, start) => {
+      const seen = new Set();
+      for (let node = start; node !== null; node = parents[node]) {
+        if (seen.has(node)) { problems.push(`Node ${start + 1} is in a cycle of parents.`); break; }
+        seen.add(node);
+      }
+    });
+  }
+  if (problems.length) throw new Error(`The plan has ${problems.length} problem${problems.length === 1 ? "" : "s"}:\n- ${[...new Set(problems)].slice(0, 20).join("\n- ")}`);
+  const chunks = tree ? normalizeReplayTree(raw, files) : normalizeReplayChunks(raw, files);
+  return { model: "Your agent", chunks, truncated: false, ...(tree ? { layout: "tree" } : {}) };
 }
 
 function validPath(value) {
@@ -298,10 +390,28 @@ export async function main(argv) {
   if (timeout !== null && !(timeout > 0)) throw new Error("--timeout must be a positive number of minutes.");
 
   const { repo, session } = await snapshot(options);
+  if (options.listLines) {
+    const files = parseUnifiedDiff(session.diff);
+    process.stdout.write(`# Changed lines for a Chronosphere review plan: ${changedLines(files).length} lines in ${files.length} files. Cover each number exactly once.
+# The plan file starts {"base": "${session.base.sha}", "snapshot": "${session.head.sha}", "layout": "steps" or "tree", …}
+${numberedChanges(files).text}
+`);
+    return 0;
+  }
+  if (options.plan) {
+    let plan;
+    try { plan = JSON.parse(await readFile(resolve(options.plan), "utf8")); }
+    catch (error) { throw new Error(`Could not read --plan: ${error.message}`); }
+    session.replay = planReplay(plan, session);
+  }
   const files = session.diff.match(/^diff --git /gm)?.length ?? 0;
   const bridge = serveReview({ repo, session, appOrigin, port, onOpened: () => process.stderr.write("The review page is open.\n") });
   const link = reviewLink(appOrigin, await bridge.ready, bridge.token);
-  process.stderr.write(`Snapshot ${session.head.sha.slice(0, 8)}: ${files} changed file${files === 1 ? "" : "s"} against ${session.base.ref}${session.recording ? `, replaying ${session.recording.name}` : ""}.\nReview link: ${link}\nWaiting for the review to be submitted (Ctrl-C to cancel)…\n`);
+  const replays = [
+    session.replay ? `the agent's ${session.replay.layout === "tree" ? `${session.replay.chunks.length}-node dependency tree` : `${session.replay.chunks.length}-step plan`}` : "",
+    session.recording ? session.recording.name : "",
+  ].filter(Boolean);
+  process.stderr.write(`Snapshot ${session.head.sha.slice(0, 8)}: ${files} changed file${files === 1 ? "" : "s"} against ${session.base.ref}${replays.length ? `, replaying ${replays.join(" and ")}` : ""}.\nReview link: ${link}\nWaiting for the review to be submitted (Ctrl-C to cancel)…\n`);
   if (options.open) openBrowser(link);
 
   const stop = (code, message) => { bridge.close(); process.stderr.write(message); process.exit(code); };

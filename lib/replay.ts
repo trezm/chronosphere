@@ -1,4 +1,4 @@
-import { changedLines, normalizeReplayChunks, parseUnifiedDiff, type RawReplayChunk } from "./diff";
+import { changedLines, normalizeReplayChunks, numberedChanges, parseUnifiedDiff, type RawReplayChunk } from "./diff";
 import { normalizeReplayTree } from "./replay-tree";
 import { defaultOpenRouterModel } from "./config";
 import { OpenRouterError, openRouterError, type OpenRouterErrorPayload, readOpenRouterContent } from "./replay-stream";
@@ -37,36 +37,6 @@ Rules:
 ${COVERAGE_RULES}
 - The description says what the node does and what it provides to the node above it.
 - Return only JSON matching: {"nodes":[{"id":"user-model","parent":"user-service","ranges":[{"start":1,"end":3},{"start":40,"end":52}],"title":"Short title","description":"One or two sentences.","impactful":false}]}`;
-
-function listing(diff: string): { text: string; truncated: boolean } {
-  const files = parseUnifiedDiff(diff);
-  let output = "";
-  let truncated = false;
-  for (const file of files) {
-    const header = `\n== ${file.path} (${file.status})\n`;
-    if (output.length + header.length > MAX_LISTING_CHARS) {
-      truncated = true;
-      break;
-    }
-    output += header;
-    for (const hunk of file.hunks) {
-      const lines = [hunk.header, ...hunk.lines.map((line) => {
-        if (line.type === "context") return `       ${line.text}`;
-        return `[${line.changedIndex}] ${line.type === "add" ? "+" : "-"} ${line.text}`;
-      })];
-      for (const line of lines) {
-        if (output.length + line.length + 1 > MAX_LISTING_CHARS) {
-          truncated = true;
-          break;
-        }
-        output += `${line}\n`;
-      }
-      if (truncated) break;
-    }
-    if (truncated) break;
-  }
-  return { text: output.trim(), truncated };
-}
 
 /** Longest slice of model output kept when reporting unparseable JSON. */
 const OUTPUT_SNIPPET_CHARS = 400;
@@ -117,7 +87,7 @@ export async function buildReplay(
   const files = parseUnifiedDiff(detail.diff);
   const total = changedLines(files).length;
   if (total === 0) throw new Error("This pull request has no textual changes to replay.");
-  const numbered = listing(detail.diff);
+  const numbered = numberedChanges(files, MAX_LISTING_CHARS);
   const model = options.model?.trim() || defaultOpenRouterModel();
   const tree = options.layout === "tree";
   const prompt = `PR #${detail.number}: ${detail.title}\nBase: ${detail.base}  Head: ${detail.head}  Author: @${detail.author.login}\n\nDescription:\n${detail.body || "(no description)"}\n\nChanged lines, numbered:\n${numbered.text}`;
