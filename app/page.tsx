@@ -1975,6 +1975,7 @@ function LocalReviewApp() {
       const permission = bridge ? await loopbackPermission() : null;
       if (!active) return;
       if (!bridge) setState({ status: "missing" });
+      else if (permission === "denied") setState({ status: "error", bridge, message: `This browser blocks ${window.location.host} from reaching apps on your computer, where the review command is serving your agent's changes. Allow local network access in this site's settings and try again, or open the link in Chrome or Firefox.` });
       else if (permission === "prompt") setState({ status: "permission", bridge });
       else void connect(bridge);
     };
